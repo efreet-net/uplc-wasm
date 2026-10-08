@@ -6,6 +6,10 @@
 
 use uplc_conformance::{Outcome, Request};
 
+pub mod ast;
+pub mod error;
+pub mod limits;
+
 pub fn evaluate(request: &Request) -> Outcome {
     if let Err(error) = request.validate() {
         return Outcome::infrastructure(format!("invalid request: {error}"));

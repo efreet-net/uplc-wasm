@@ -46,6 +46,14 @@ coefficient vector determine behavior. A changed vector with a new valid hash is
 an explicit custom model, not a request to use defaults. The fixture importer
 requires the pinned fixture model because its budget goldens depend on it.
 
+The candidate's first milestone accepts only raw Flat, restricting mode,
+PlutusV3/protocol 11, and exactly 350 supplied coefficients. Wrong vector length
+is an infrastructure error; negative machine-step coefficients are unsupported.
+Negative builtin polynomial coefficients are valid and are not substituted.
+Textual UPLC, counting, other profiles, builtins, constr/case, and complex
+constants remain unsupported, including in unevaluated lambda/delay bodies.
+The candidate does not implement ledger argument construction or CBOR unwrapping.
+
 ## Response
 
 Every response contains `schema_version`, the echoed `id`, `engine`, `revision`,
@@ -66,6 +74,15 @@ The runner rejects unknown response fields, duplicate JSON fields, nonfinite JSO
 numbers, malformed normalized constructors, and missing outcome fields. Every
 integer in a normalized term must be a canonical decimal string; booleans must
 be JSON booleans. Consumed budgets must be nonnegative i64 strings.
+
+For the primitive candidate, malformed Flat fails decoding before startup and
+has a null budget. Startup is charged immediately; machine compute events use
+the official 200-event batching policy and flush on successful termination.
+Semantic errors do not flush pending events. Exhaustion includes the entire
+attempted CPU and memory charge. Checked overflow beyond the i64 wire range is
+`budget_exhausted` with a null budget, never wrapping or saturation. Implementation
+resource/result limits yield unsupported. See [the milestone policy](milestone.md)
+for charging order, supported decoding guarantees, and portable bounds.
 
 ## Normalized terms
 

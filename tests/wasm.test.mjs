@@ -1,16 +1,19 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import test from 'node:test';
-import { requests, nativeResponses } from './requests.mjs';
+import { requests, nativeResponses, assertExpectedOutcomes } from './requests.mjs';
 
 const require = createRequire(import.meta.url);
 const { evaluate_json } = require('../pkg/node/uplc_wasm.js');
 
-test('the packaged release Wasm API matches the native API on the same requests', async () => {
+test('release Wasm and native APIs match independent goldens and retain unsupported scope', async () => {
   const expected = await nativeResponses();
+  assertExpectedOutcomes(expected);
   // Reuse the same instance to exercise the exported API across multiple calls.
   for (let pass = 0; pass < 3; pass++) {
-    requests.forEach((request, i) => assert.deepEqual(JSON.parse(evaluate_json(request)), expected[i]));
+    const actual = requests.map(request => JSON.parse(evaluate_json(request)));
+    assertExpectedOutcomes(actual);
+    assert.deepEqual(actual, expected);
   }
 });
 
@@ -23,4 +26,21 @@ test('out-of-range budgets are transport errors in the actual Wasm artifact', ()
 test('counting requests with extra fields are transport errors', () => {
   const request = requests.find(r => r.includes('abi/counting/extra-fields'));
   assert.equal(JSON.parse(evaluate_json(request)).outcome.status, 'infrastructure_error');
+});
+
+test('integer values and consumed costs above JavaScript precision remain exact strings', () => {
+  const integer = requests.find(request => request.includes('milestone/probe/integer-above-js-precision'));
+  assert.deepEqual(JSON.parse(evaluate_json(integer)).outcome.term,
+    ['constant', ['integer', '9007199254740993']]);
+  const request = requests.find(request => request.includes('abi/precise-consumed-budget'));
+  assert.deepEqual(JSON.parse(evaluate_json(request)).outcome.budget,
+    { cpu: '9007199254741093', mem: '9007199254741093' });
+});
+
+test('unrepresentable consumed totals return budget exhaustion with a null budget', () => {
+  const request = requests.find(request => request.includes('abi/overflow'));
+  const outcome = JSON.parse(evaluate_json(request)).outcome;
+  assert.equal(outcome.status, 'failure');
+  assert.equal(outcome.kind, 'budget_exhausted');
+  assert.equal(outcome.budget, null);
 });

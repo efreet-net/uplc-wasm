@@ -1,12 +1,15 @@
 # UPLC evaluator for Rust and WebAssembly
 
-A scaffold for an independent Cardano UPLC evaluator with pinned Aiken and
+An independent Cardano UPLC evaluator with pinned Aiken and
 Amaru reference adapters, official Plutus fixtures, and native/Wasm parity tests.
 
-**The candidate evaluator is not implemented yet.** It returns `unsupported` for
-valid evaluation requests. No semantic or costing compliance is claimed. The
-reference adapters and harness work independently of the candidate, so they can
-be used to guide its implementation.
+**The first evaluator milestone implements a small raw Flat subset:** arbitrary
+precision integers, bytestrings, strings, booleans, unit, variables, lambdas and
+application, delay and force, and explicit errors. Native and Wasm call the same
+independent CEK machine, with exact startup/step costs and restricting budgets.
+Builtins, constr/case, composite constants, text parsing, counting mode, and
+historical profiles remain explicitly unsupported. This is scoped conformance,
+not a complete UPLC evaluator; see [milestone coverage and limits](docs/milestone.md).
 
 ## Quick start
 
@@ -16,7 +19,7 @@ upstream's exact `nightly-2026-09-04` toolchain; its declared stable MSRV alone
 does not compile the pinned kernel code.
 
 ```sh
-make check test
+make check test milestone-check
 make report
 
 # Build the actual release Wasm artifact and exercise its JavaScript API.
@@ -31,18 +34,20 @@ make test-browser
 BROWSER=firefox npm run test:browser
 ```
 
-`make report` explicitly permits unsupported cases and reports them separately
-from passes. `make conformance` is strict and exits unsuccessfully while any case
-is unsupported, mismatched, or affected by an infrastructure error. CI currently
-uses reporting mode for the candidate; remove `--allow-unsupported` when its
-initial compatibility profile is implemented. Browser/Node API parity checks
-are infrastructure checks, not a claim of UPLC conformance.
+`make milestone-check` strictly checks 68 supported semantic/cost cases and 18
+independent decoder expectations. `make report` keeps broader smoke and deferred
+feature coverage visible, reporting unsupported cases separately from passes.
+`make conformance` still checks the broad smoke corpus strictly and remains
+incomplete. Node and browser tests check committed independent goldens as well as
+native/Wasm parity, including exact integers and consumed costs beyond JavaScript
+number precision. Unsupported scope assertions are separate from conformance passes.
 
 ## Reference comparisons
 
 ```sh
 rustup toolchain install nightly-2026-09-04 --profile minimal
 make reference-check
+make milestone-reference-check
 
 python3 tools/conformance.py \
   --engine native=target/debug/uplc-native \
@@ -82,6 +87,8 @@ explicitly unsupported by these starter adapters.
 | `tools/conformance.py` | Persistent subprocess runner, deadlines, comparisons, failure artifacts |
 | `tools/oracle-*` | Separately pinned native reference evaluators and AST normalizers |
 | `fixtures/smoke.jsonl` | Nine small semantic, cost, trace, decoding, and budget cases |
+| `fixtures/milestone*.jsonl` | Strict Flat milestone, independent decoder goldens, and visible deferred/audit cases |
+| `fixtures/milestone/plutus` | Unmodified official subset inputs, expected results, and budgets |
 | `fixtures/plutus` | Unmodified upstream seed inputs/goldens, with LICENSE and NOTICE |
 | `profiles` | Explicit language/protocol/cost-model combinations |
 | `fuzz` | Separate cargo-fuzz workspace with transport and raw Flat entry points |
@@ -143,14 +150,15 @@ reported as mismatches, not silently skipped or rewritten into passing goldens.
 
 ## Implementation boundaries
 
-- Implement Flat decoding, version gates, the CEK machine, builtins, and exact
-  costing in `uplc-core`. Use arbitrary-precision UPLC integers and explicit
-  integer budget arithmetic independent of host pointer size.
+- Core/Wasm have no oracle dependencies. The implemented primitive CEK slice
+  uses arbitrary-precision integers and checked budget arithmetic independent
+  of host pointer size. Costs come from the complete validated supplied vector;
+  changing its hash and coefficients changes execution costs, regardless of ID.
 - Both starter references expose restricting evaluation. Counting requests
   return `unsupported`; a large budget is never labeled counting mode. The
   full importer uses a stated large restricting budget for counting-mode
   goldens, so budget exhaustion can legitimately produce a reported mismatch.
-- Normalization covers all UPLC term constructors and primitive/list/pair
+- Reference normalization covers all UPLC term constructors and primitive/list/pair
   constants. Data, BLS element results, native Value, and Amaru arrays need
   additional structural normalizers. Evaluations returning these values are
   marked unsupported instead of comparing debug strings. Crypto builtins that
@@ -162,8 +170,10 @@ reported as mismatches, not silently skipped or rewritten into passing goldens.
   phase-two validation; the adapters currently use each library's raw APIs.
   These raw APIs accept trailing Flat bytes and unknown program versions in
   simple probes. Reference agreement therefore does not establish ledger decoder
-  compliance; strict consumption, version gates, and CBOR handling need separate
-  independent goldens.
+  compliance. The candidate enforces full consumption, exact filler and the
+  initial profile's version gates against independent decoder goldens. CBOR
+  wrapping is outside this raw Flat API. See the milestone document for retained
+  raw-reference De Bruijn disagreements and failure-charging policy.
 - Haskell live evaluation, historical profiles, full Flat/CBOR decoder
   coverage, automatic shrinking, and performance benchmarks are follow-up
   work. The official fixture expectations are the current independent anchor.

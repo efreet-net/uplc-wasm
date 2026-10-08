@@ -1,7 +1,7 @@
 PYTHON ?= python3
 WASM_BINDGEN ?= wasm-bindgen
 
-.PHONY: check test native upstreams references conformance report reference-check provenance wasm test-wasm test-browser generated import-plutus
+.PHONY: check test native upstreams references conformance report reference-check provenance wasm test-wasm test-browser generated import-plutus milestone-check milestone-reference-check
 
 check:
 	cargo fmt --all --check
@@ -22,13 +22,23 @@ references: upstreams
 	cargo +1.96.0 build --locked --manifest-path tools/oracle-aiken/Cargo.toml
 	cargo +nightly-2026-09-04 build --locked --manifest-path tools/oracle-amaru/Cargo.toml
 
-# Strict by default. This fails until the candidate implements the smoke corpus.
+# Broad smoke coverage remains strict and incomplete until later milestones.
 conformance: native
 	$(PYTHON) tools/conformance.py --engine native=target/debug/uplc-native
 
-# Scaffold coverage reporting explicitly permits unsupported cases, never mismatches.
+# Strict independently expected coverage of the implemented evaluator slice.
+milestone-check: native
+	$(PYTHON) tools/conformance.py --corpus fixtures/milestone.jsonl --engine native=target/debug/uplc-native --artifacts artifacts/milestone/native
+	$(PYTHON) tools/conformance.py --corpus fixtures/milestone-decoder.jsonl --engine native=target/debug/uplc-native --artifacts artifacts/milestone/decoder
+
+milestone-reference-check: native references provenance
+	$(PYTHON) tools/build_milestone_corpus.py --check
+	$(PYTHON) tools/conformance.py --corpus fixtures/milestone.jsonl --engine native=target/debug/uplc-native --engine aiken=tools/oracle-aiken/target/debug/oracle-aiken --engine amaru=tools/oracle-amaru/target/debug/oracle-amaru --failure-costs --artifacts artifacts/milestone/references
+
+# Broader coverage reporting permits unsupported cases, never mismatches.
 report: native
 	$(PYTHON) tools/conformance.py --engine native=target/debug/uplc-native --allow-unsupported
+	$(PYTHON) tools/conformance.py --corpus fixtures/milestone-unsupported.jsonl --engine native=target/debug/uplc-native --allow-unsupported --artifacts artifacts/milestone/unsupported
 
 provenance: upstreams
 	$(PYTHON) tools/verify_provenance.py

@@ -30,7 +30,7 @@ jobs:
             tools/oracle-aiken/target
             tools/oracle-amaru/target
           key: references-${{ runner.os }}-${{ hashFiles('upstreams.lock.json', '**/Cargo.lock') }}
-      - run: make reference-check native
+      - run: make reference-check milestone-reference-check
       - run: python3 tools/generate_cases.py --seed 42 --count 1000
       - name: Generated cases against both references
         run: >-

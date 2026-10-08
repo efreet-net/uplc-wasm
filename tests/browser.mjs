@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { chromium, firefox } from 'playwright';
-import { root, requests, nativeResponses } from './requests.mjs';
+import { root, requests, nativeResponses, assertExpectedOutcomes } from './requests.mjs';
 
 const [moduleSource, moduleBytes] = await Promise.all([
   readFile(root + 'pkg/web/uplc_wasm.js'), readFile(root + 'pkg/web/uplc_wasm_bg.wasm'),
@@ -19,8 +19,11 @@ try {
     await wasm.default({ module_or_path: new Uint8Array(bytes) });
     return inputs.map(input => JSON.parse(wasm.evaluate_json(input)));
   }, { source: moduleSource.toString('base64'), bytes: [...moduleBytes], inputs: requests });
-  assert.deepEqual(actual, await nativeResponses());
-  console.log(`${actual.length} native/${name} API parity checks passed`);
+  const native = await nativeResponses();
+  assertExpectedOutcomes(native);
+  assertExpectedOutcomes(actual);
+  assert.deepEqual(actual, native);
+  console.log(`${actual.length} native/${name} API checks passed: 68 milestone and 18 independent decoder goldens, 7 unsupported scope assertions, legacy smoke and ABI boundaries`);
 } finally {
   await browser?.close();
 }

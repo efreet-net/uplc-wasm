@@ -53,7 +53,9 @@ pub struct CostModel {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Mode {
-    Counting,
+    // An empty struct variant makes Serde enforce deny_unknown_fields. An
+    // internally tagged unit variant silently discards extra fields.
+    Counting {},
     Restricting { budget: Budget },
 }
 
@@ -303,6 +305,17 @@ mod tests {
             serde_json::from_str::<Response>(&response).unwrap().outcome,
             Outcome::InfrastructureError { .. }
         ));
+    }
+
+    #[test]
+    fn counting_mode_rejects_fields_instead_of_silently_ignoring_them() {
+        assert!(serde_json::from_str::<Mode>(r#"{"kind":"counting"}"#).is_ok());
+        for json in [
+            r#"{"kind":"counting","budget":{"cpu":"1","mem":"1"}}"#,
+            r#"{"kind":"counting","extra":true}"#,
+        ] {
+            assert!(serde_json::from_str::<Mode>(json).is_err());
+        }
     }
 
     #[test]

@@ -42,7 +42,6 @@ are infrastructure checks, not a claim of UPLC conformance.
 
 ```sh
 rustup toolchain install nightly-2026-09-04 --profile minimal
-make references
 make reference-check
 
 python3 tools/conformance.py \
@@ -59,8 +58,10 @@ python3 tools/conformance.py \
 ```
 
 `tools/upstreams.py` downloads immutable source revisions and verifies their
-archive SHA-256 hashes before extracting into `.cache/upstreams`. It does not
-edit those sources. Both adapter workspaces have independent Cargo lockfiles;
+archive SHA-256 hashes before extracting into `.cache/upstreams`. Reuse also
+checks the extracted source files against the archive and rejects modifications
+or additions outside build `target` directories. It does not edit those sources.
+Both adapter workspaces have independent Cargo lockfiles;
 their dependencies never enter the Wasm build. Source pins are recorded in
 `upstreams.lock.json`, not floating branches or crate names that could refer to
 older Amaru distributions.
@@ -88,9 +89,13 @@ explicitly unsupported by these starter adapters.
 
 The process runner is Python standard library only. It compares every engine
 pair, so an unsupported candidate cannot hide a disagreement between references.
+It validates complete response envelopes and nested normalized terms, rejecting
+JSON numbers in integer positions, malformed constructors, and duplicate fields.
 It writes `artifacts/conformance/report.json` and individual reproduction
 artifacts for mismatches and infrastructure failures. Command arguments are
-tokenized without invoking a shell.
+tokenized without invoking a shell and recorded with the comparison settings.
+On POSIX, timeout cleanup kills the evaluator's process group so descendants
+holding its pipes cannot defeat the deadline.
 
 ## Growing the corpus
 
@@ -120,11 +125,17 @@ with already-applied arguments and their historical profiles under
 `fixtures/replay`. A future ledger wrapper should separately test construction
 of datum/redeemer/script-context arguments and ledger return-value rules.
 
-The importer preserves official output and cost expectations. A reference
-adapter's `--normalize` mode only parses the expected term into a name-free AST;
-it does not evaluate the program or regenerate its costs. Unsupported golden
-normalization remains visible as incomplete coverage. The pinned fixture
-revision primarily supplies textual UPLC; the seed corpus also includes an
+The importer preserves official output and cost expectations, including raw
+golden text and hashes in each case's provenance. Both reference adapters'
+`--normalize` modes parse the expected term into a name-free AST without
+evaluating it. A normalized golden is used only when both parsers agree;
+unsupported normalization or parser disagreement remains incomplete coverage.
+This matters for escaped strings that the pinned Aiken parser misreads. Custom
+normalizers require two distinct implementations via repeated `--normalizer`.
+Imports publish atomically, refuse overwrites, and require the fixture cost model.
+`make provenance` verifies the profile coefficients and vendored seed files
+against their pinned upstream sources; reference CI runs this check.
+The pinned fixture revision primarily supplies textual UPLC; the seed corpus also includes an
 explicit raw Flat case. Import newer Flat fixture sets under a new pinned profile.
 The full corpus is an audit and may report upstream disagreements: for example,
 the pinned Aiken parser rejects the valid array-constant fixtures. These are
@@ -149,6 +160,10 @@ reported as mismatches, not silently skipped or rewritten into passing goldens.
   costs are compared only with `--failure-costs`, because charging boundaries
   can differ between machines. Raw VM evaluation is distinct from ledger
   phase-two validation; the adapters currently use each library's raw APIs.
+  These raw APIs accept trailing Flat bytes and unknown program versions in
+  simple probes. Reference agreement therefore does not establish ledger decoder
+  compliance; strict consumption, version gates, and CBOR handling need separate
+  independent goldens.
 - Haskell live evaluation, historical profiles, full Flat/CBOR decoder
   coverage, automatic shrinking, and performance benchmarks are follow-up
   work. The official fixture expectations are the current independent anchor.

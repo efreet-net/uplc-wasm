@@ -1,10 +1,11 @@
 PYTHON ?= python3
 WASM_BINDGEN ?= wasm-bindgen
 
-.PHONY: check test native upstreams references conformance report reference-check wasm test-wasm test-browser generated import-plutus
+.PHONY: check test native upstreams references conformance report reference-check provenance wasm test-wasm test-browser generated import-plutus
 
 check:
 	cargo fmt --all --check
+	rustfmt --edition 2024 --check tools/oracle-aiken/src/main.rs tools/oracle-amaru/src/main.rs
 	cargo clippy --workspace --all-targets --locked -- -D warnings
 
 test:
@@ -29,7 +30,10 @@ conformance: native
 report: native
 	$(PYTHON) tools/conformance.py --engine native=target/debug/uplc-native --allow-unsupported
 
-reference-check:
+provenance: upstreams
+	$(PYTHON) tools/verify_provenance.py
+
+reference-check: references provenance
 	$(PYTHON) tools/conformance.py --engine aiken=tools/oracle-aiken/target/debug/oracle-aiken --engine amaru=tools/oracle-amaru/target/debug/oracle-amaru --artifacts artifacts/references
 
 wasm:
@@ -46,5 +50,5 @@ test-browser: native wasm
 generated:
 	$(PYTHON) tools/generate_cases.py --seed 42 --count 1000
 
-import-plutus:
+import-plutus: references provenance
 	$(PYTHON) tools/import_plutus.py

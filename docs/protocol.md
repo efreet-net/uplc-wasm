@@ -5,6 +5,8 @@ diagnostics go to stderr. The runner bounds requests/responses with deadlines an
 isolates interpreter crashes in child processes. The Rust server limits a request
 to 8 MiB and the runner limits a response to 16 MiB. Wasm exports the equivalent
 `evaluate_json(string): string` API.
+Response lines must end with a newline. On POSIX the runner kills the process
+group on failure, including children that inherit the evaluator's pipes.
 
 ## Request
 
@@ -39,11 +41,16 @@ preimage for coefficients `["1","-2","3"]` is the UTF-8 byte string `[1,-2,3]`.
 Parameter order is the ledger API order for the selected profile. Unknown fields,
 noncanonical decimals, out-of-range i64 coefficients/limits, and wrong hashes
 are request errors, not semantic UPLC failures.
+Profile IDs are descriptive labels; language, protocol, and the complete hashed
+coefficient vector determine behavior. A changed vector with a new valid hash is
+an explicit custom model, not a request to use defaults. The fixture importer
+requires the pinned fixture model because its budget goldens depend on it.
 
 ## Response
 
 Every response contains `schema_version`, the echoed `id`, `engine`, `revision`,
-and an `outcome`. The outcomes are:
+and an `outcome`. Requests that cannot be deserialized (or exceed the size limit)
+may return an empty `id`. The outcomes are:
 
 | Status | Fields |
 | --- | --- |
@@ -55,6 +62,10 @@ and an `outcome`. The outcomes are:
 The candidate currently identifies its revision by package version. Reference
 adapters use pinned source commit IDs. Add the candidate build commit to the
 identity before using reports as release provenance.
+The runner rejects unknown response fields, duplicate JSON fields, nonfinite JSON
+numbers, malformed normalized constructors, and missing outcome fields. Every
+integer in a normalized term must be a canonical decimal string; booleans must
+be JSON booleans. Consumed budgets must be nonnegative i64 strings.
 
 ## Normalized terms
 
@@ -91,6 +102,10 @@ path), `program`, `mode`, optional `expected`, and `provenance`. Expected output
 can omit information the upstream golden does not provide, such as traces or
 failure costs. At least two engines or a golden are needed for a comparison.
 An `unavailable` field records an importer limitation and prevents a pass.
+Imported cases retain raw upstream result/budget texts and hashes, plus the
+identity and outcome of each golden parser, in `provenance`. A normalized term
+is used only when two independent parsers agree. Parser failures or disagreements
+leave the term unavailable while retaining independent status/cost expectations.
 
 Every pair of engines is compared. Priority is infrastructure error, mismatch,
 unsupported, then pass. `--allow-unsupported` changes the exit policy only; the

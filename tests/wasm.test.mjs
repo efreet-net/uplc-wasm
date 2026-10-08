@@ -19,3 +19,8 @@ test('out-of-range budgets are transport errors in the actual Wasm artifact', ()
     assert.equal(JSON.parse(evaluate_json(request)).outcome.status, 'infrastructure_error');
   }
 });
+
+test('counting requests with extra fields are transport errors', () => {
+  const request = requests.find(r => r.includes('abi/counting/extra-fields'));
+  assert.equal(JSON.parse(evaluate_json(request)).outcome.status, 'infrastructure_error');
+});

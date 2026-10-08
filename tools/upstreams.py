@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -10,6 +11,46 @@ import tarfile
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def verify_archive(archive, pin):
+    with archive.open("rb") as source:
+        digest = hashlib.file_digest(source, "sha256").hexdigest()
+    if digest != pin["archive_sha256"]:
+        raise ValueError(f"archive checksum mismatch: {archive}")
+
+
+def verify_source(name, pin):
+    """Verify cached source bytes too: a marker alone cannot attest a working tree."""
+    cache = ROOT / ".cache/upstreams"
+    archive = cache / f"{name}-{pin['revision']}.tar.gz"
+    verify_archive(archive, pin)
+    destination = cache / name
+    marker = destination / ".uplc-scaffold-source.json"
+    if json.loads(marker.read_text()) != pin:
+        raise ValueError(f"{name}: source pin mismatch")
+    expected = set()
+    with tarfile.open(archive) as tar:
+        for member in tar:
+            relative = Path(member.name).parts[1:]
+            path = destination.joinpath(*relative)
+            if not member.isdir():
+                expected.add(Path(*relative))
+            if member.isfile() or member.islnk():
+                if path.is_symlink():
+                    raise ValueError(f"{name}: cached source file replaced by a symlink: {path}")
+                with tar.extractfile(member) as original, path.open("rb") as actual:
+                    if hashlib.file_digest(original, "sha256").digest() != hashlib.file_digest(actual, "sha256").digest():
+                        raise ValueError(f"{name}: cached source differs from pinned archive: {path}")
+            elif member.issym() and (not path.is_symlink() or path.readlink() != Path(member.linkname)):
+                raise ValueError(f"{name}: cached symlink differs from pinned archive: {path}")
+    for directory, dirs, files in os.walk(destination, followlinks=False):
+        dirs[:] = [name for name in dirs if name != "target"]
+        for filename in files + [name for name in dirs if (Path(directory) / name).is_symlink()]:
+            relative = (Path(directory) / filename).relative_to(destination)
+            if relative != Path(".uplc-scaffold-source.json") and relative not in expected:
+                raise ValueError(f"{name}: unexpected cached source file: {relative}")
+    return destination
 
 
 def fetch(name, pin, archives_dir=None):
@@ -27,13 +68,12 @@ def fetch(name, pin, archives_dir=None):
                 "--output", str(partial),
             ], check=True)
             partial.rename(archive)
-    digest = hashlib.file_digest(archive.open("rb"), "sha256").hexdigest()
-    if digest != pin["archive_sha256"]:
-        raise ValueError(f"{name}: archive checksum mismatch; remove {archive} before retrying")
+    verify_archive(archive, pin)
     destination = cache / name
     marker = destination / ".uplc-scaffold-source.json"
     if marker.exists() and json.loads(marker.read_text()) == pin:
-        print(f"{name}: {pin['revision']} already available")
+        verify_source(name, pin)
+        print(f"{name}: {pin['revision']} cached source verified")
         return
     if destination.exists():
         raise ValueError(f"refusing to replace existing source directory {destination}; move it aside first")

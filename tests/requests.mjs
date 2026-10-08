@@ -16,6 +16,10 @@ for (const cpu of ['9007199254740993', '9223372036854775807', '92233720368547758
   requests.push(JSON.stringify(request));
 }
 requests.push('{}', '{broken json');
+const invalidMode = JSON.parse(requests[0]);
+invalidMode.id = 'abi/counting/extra-fields';
+invalidMode.mode = { kind: 'counting', budget: { cpu: '1', mem: '1' } };
+requests.push(JSON.stringify(invalidMode));
 
 export async function nativeResponses() {
   const output = await new Promise((resolve, reject) => {

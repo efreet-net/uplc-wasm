@@ -1,15 +1,18 @@
 import contextlib
 import io
 import json
+import os
 import re
 from pathlib import Path
 import shlex
 import sys
 import tempfile
+import time
 import unittest
 from argparse import Namespace
 
 from conformance import Engine, ROOT, compare, compare_golden, load_cases, make_request, run, validate_outcome
+from protocol import loads, validate_request, validate_response, validate_term
 
 
 def success(value="9007199254740993", cpu="123"):
@@ -63,6 +66,58 @@ class ComparisonTests(unittest.TestCase):
             self.assertEqual(revision, pins[name]["revision"])
 
 
+class ValidationTests(unittest.TestCase):
+    def test_malformed_terms_cannot_create_false_agreement(self):
+        for term in (["unknown"], ["constant", ["integer", 9007199254740993]],
+                     ["constant", ["bool", 1]], ["var", "+1"], ["lambda"],
+                     ["constant", ["bytes", "FF"]], ["constr", "0", {}],
+                     ["constant", ["list", "unknown-type", []]],
+                     ["constant", ["list", "integer", [["bool", True]]]],
+                     ["constant", ["string", "\ud800"]],
+                     ["constant", ["pair", "integer", "unit", ["integer", "01"], ["unit"]]]):
+            with self.subTest(term=term), self.assertRaises(ValueError):
+                validate_outcome(dict(success(), term=term))
+
+    def test_full_structures_and_large_integer_strings(self):
+        validate_term(["case", ["constr", "0", [["constant", ["unit"]]]],
+                       [["lambda", ["apply", ["builtin", "0"], ["var", "1"]]]]])
+        validate_term(["constant", ["pair", ["list", "integer"], "bool",
+                       ["list", "integer", [["integer", "9" * 10000]]], ["bool", True]]])
+        term = ["error"]
+        for _ in range(513):
+            term = ["delay", term]
+        with self.assertRaisesRegex(ValueError, "depth"):
+            validate_term(term)
+
+    def test_outcomes_require_all_fields_and_canonical_budgets(self):
+        for outcome in ({"status": "unsupported"}, {"status": "infrastructure_error"},
+                        dict(success(), extra=True), dict(success(), budget={"cpu": str(2**63), "mem": "0"}),
+                        dict(success(), traces=[1]), dict(success(), budget=None)):
+            with self.subTest(outcome=outcome), self.assertRaises(ValueError):
+                validate_outcome(outcome)
+
+    def test_strict_json_and_response_envelope(self):
+        for text in ('{"x":1,"x":2}', '{"x":NaN}', '{"x":Infinity}'):
+            with self.assertRaises(ValueError):
+                loads(text)
+        valid = dict(schema_version=1, id="test", engine="test", revision="test", outcome=success())
+        for response in (dict(valid, schema_version=True), dict(valid, engine=1), dict(valid, extra=1)):
+            with self.assertRaises(ValueError):
+                validate_response(response, "test")
+
+    def test_request_validation_matches_rust_limits(self):
+        original = make_request(load_cases([ROOT / "fixtures/smoke.jsonl"])[0])
+        for field, value in (("schema_version", True), ("mode", {"kind": "counting", "budget": {}}),
+                             ("program", {"format": "flat", "hex": "00 11"})):
+            with self.assertRaises(ValueError):
+                validate_request(dict(original, **{field: value}))
+        for coefficient in ("01", "-0", str(2**63), "1" * 10000):
+            request = json.loads(json.dumps(original))
+            request["profile"]["cost_model"]["parameters"][0] = coefficient
+            with self.assertRaises(ValueError):
+                validate_request(request)
+
+
 class ProcessTests(unittest.TestCase):
     def engine(self, script, timeout=1):
         return Engine("test", f"{shlex.quote(sys.executable)} -u -c {shlex.quote(script)}", timeout)
@@ -80,6 +135,47 @@ class ProcessTests(unittest.TestCase):
             self.assertEqual(engine.evaluate({"id": "crash"})["outcome"]["status"], "infrastructure_error")
         finally:
             engine.close()
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_descendant_holding_pipes_cannot_extend_deadline(self):
+        engine = self.engine("import subprocess,sys\nsubprocess.Popen([sys.executable,'-c','import time; time.sleep(3)'])", timeout=0.15)
+        started = time.monotonic()
+        try:
+            self.assertEqual(engine.evaluate({"id": "child"})["outcome"]["status"], "infrastructure_error")
+            self.assertLess(time.monotonic() - started, 1.5)
+        finally:
+            engine.close()
+
+    def test_blocked_stdin_is_bounded(self):
+        engine = self.engine("import time; time.sleep(3)", timeout=0.15)
+        started = time.monotonic()
+        try:
+            result = engine.evaluate({"id": "blocked-write", "payload": "x" * 1000000})
+            self.assertEqual(result["outcome"]["status"], "infrastructure_error")
+            self.assertLess(time.monotonic() - started, 1.5)
+        finally:
+            engine.close()
+
+    def test_malformed_response_and_restart(self):
+        engine = self.engine("import sys; sys.stdin.readline(); print('{\"schema_version\":' + '['*2000 + '0' + ']'*2000 + '}')")
+        try:
+            for _ in range(2):
+                self.assertEqual(engine.evaluate({"id": "malformed"})["outcome"]["status"], "infrastructure_error")
+        finally:
+            engine.close()
+
+    def test_unterminated_jsonl_is_an_error(self):
+        response = dict(schema_version=1, id="test", engine="test", revision="test", outcome=success())
+        engine = self.engine("import sys; sys.stdin.readline(); sys.stdout.write(" + repr(json.dumps(response)) + ")")
+        try:
+            self.assertEqual(engine.evaluate({"id": "test"})["outcome"]["status"], "infrastructure_error")
+        finally:
+            engine.close()
+
+    def test_nonfinite_deadlines_are_rejected(self):
+        for timeout in (float("nan"), float("inf"), 0, -1):
+            with self.assertRaises(ValueError):
+                self.engine("pass", timeout)
 
     def test_references_are_compared_when_candidate_is_unsupported(self):
         case = json.loads((ROOT / "fixtures/smoke.jsonl").read_text().splitlines()[0])

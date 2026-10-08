@@ -2,15 +2,21 @@
 """Run persistent JSONL evaluators against shared cases; default policy is strict."""
 import argparse
 from collections import Counter
+from contextlib import suppress
 import hashlib
 import itertools
 import json
+import math
+import os
 from pathlib import Path
 import queue
 import shlex
+import signal
 import subprocess
 import threading
 import time
+
+from protocol import MAX_REQUEST, loads, string, validate_outcome, validate_request, validate_response
 
 ROOT = Path(__file__).resolve().parents[1]
 MAX_RESPONSE = 16 * 1024 * 1024
@@ -22,12 +28,17 @@ def load_cases(paths):
         for number, line in enumerate(Path(path).read_text().splitlines(), 1):
             if not line.strip():
                 continue
-            case = json.loads(line)
+            case = loads(line)
+            string(case["id"], nonempty=True)
             if case["id"] in ids:
                 raise ValueError(f"duplicate case ID {case['id']} at {path}:{number}")
             ids.add(case["id"])
-            if "expected" in case and case["expected"].get("status") not in ("success", "failure"):
-                raise ValueError("goldens must describe a semantic success or failure")
+            if "unavailable" in case:
+                string(case["unavailable"], nonempty=True)
+            if "expected" in case:
+                validate_outcome(case["expected"], partial=True)
+                if case["expected"]["status"] == "success" and "term" not in case["expected"] and not case.get("unavailable"):
+                    raise ValueError("a success golden needs a term or an explicit unavailable marker")
             cases.append(case)
     if not cases:
         raise ValueError("the corpus is empty")
@@ -37,17 +48,13 @@ def load_cases(paths):
 def make_request(case):
     profile_path = (ROOT / case["profile"]).resolve()
     profile_path.relative_to(ROOT)
-    profile = json.loads(profile_path.read_text())
-    parameters = profile["cost_model"]["parameters"]
-    if not parameters or any(type(p) is not str or str(int(p)) != p for p in parameters):
-        raise ValueError("cost-model parameters must be canonical decimal strings")
-    digest = hashlib.sha256(("[" + ",".join(parameters) + "]").encode()).hexdigest()
-    if digest != profile["cost_model"]["sha256"]:
-        raise ValueError("cost-model hash mismatch")
+    profile = loads(profile_path.read_text())
     # Profile provenance is retained on disk and in artifacts, outside the wire schema.
     profile = {key: profile[key] for key in ("id", "language", "protocol_major", "cost_model")}
-    return {"schema_version": 1, "id": case["id"], "program": case["program"],
-            "profile": profile, "mode": case["mode"]}
+    request = {"schema_version": 1, "id": case["id"], "program": case["program"],
+               "profile": profile, "mode": case["mode"]}
+    validate_request(request)
+    return request
 
 
 def compare(left, right, *, compare_failure_costs=False):
@@ -79,13 +86,17 @@ def compare_golden(outcome, expected):
 
 class Engine:
     def __init__(self, name, command, timeout):
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout must be finite and positive")
         self.name, self.command, self.timeout = name, command, timeout
         self.process = None
         self.responses = queue.Queue(maxsize=4)
+        self.reader = self.writer = None
 
     def start(self):
         self.process = subprocess.Popen(shlex.split(self.command), stdin=subprocess.PIPE,
-                                        stdout=subprocess.PIPE, stderr=None, cwd=ROOT)
+                                        stdout=subprocess.PIPE, stderr=None, cwd=ROOT,
+                                        start_new_session=(os.name == "posix"))
         process, responses = self.process, self.responses
 
         def read():
@@ -97,13 +108,18 @@ class Engine:
                         break
             except (OSError, ValueError, queue.Full):
                 pass
-        threading.Thread(target=read, daemon=True).start()
+            finally:
+                process.stdout.close()
+        self.reader = threading.Thread(target=read, daemon=True)
+        self.reader.start()
 
     def evaluate(self, request):
         try:
+            encoded = json.dumps(request, separators=(",", ":")).encode() + b"\n"
+            if len(encoded) > MAX_REQUEST:
+                raise ValueError("request exceeds the transport size limit")
             if self.process is None:
                 self.start()
-            encoded = json.dumps(request, separators=(",", ":")).encode() + b"\n"
             # A worker may stop reading stdin as well as stdout. Bound both operations.
             errors = queue.Queue()
             process = self.process
@@ -113,7 +129,11 @@ class Engine:
                     process.stdin.flush()
                 except (OSError, ValueError) as error:
                     errors.put(error)
-            thread = threading.Thread(target=send, daemon=True)
+                finally:
+                    if process.poll() is not None:
+                        with suppress(OSError):
+                            process.stdin.close()
+            thread = self.writer = threading.Thread(target=send, daemon=True)
             thread.start()
             deadline = time.monotonic() + self.timeout
             thread.join(self.timeout)
@@ -123,15 +143,13 @@ class Engine:
                 raise errors.get()
             line = self.responses.get(timeout=max(0, deadline - time.monotonic()))
             if not line:
-                raise RuntimeError("engine exited without a response")
+                raise RuntimeError(f"engine exited without a response (exit code {process.poll()})")
             if len(line) > MAX_RESPONSE:
                 raise RuntimeError("engine exceeded the response size limit")
-            result = json.loads(line)
-            if result["schema_version"] != 1 or result["id"] != request["id"]:
-                raise ValueError("engine returned the wrong schema or request ID")
-            if not result.get("engine") or not result.get("revision"):
-                raise ValueError("engine identity/revision is missing")
-            validate_outcome(result["outcome"])
+            if not line.endswith(b"\n"):
+                raise ValueError("engine returned an unterminated JSONL response")
+            result = loads(line)
+            validate_response(result, request["id"])
             return result
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, queue.Empty) as error:
             self.close()
@@ -143,49 +161,51 @@ class Engine:
     def close(self):
         if self.process is not None:
             process, self.process = self.process, None
-            if process.poll() is None:
-                process.kill()
-            process.wait()
-            process.stdin.close()
-            process.stdout.close()
-
-
-def validate_outcome(outcome):
-    status = outcome["status"]
-    if status in ("success", "failure"):
-        if not isinstance(outcome["traces"], list) or any(type(t) is not str for t in outcome["traces"]):
-            raise ValueError("traces must be a list of strings")
-        if status == "success":
-            if not isinstance(outcome["term"], list) or not outcome["term"]:
-                raise ValueError("success needs a normalized structural term")
-            if outcome["budget"] is None:
-                raise ValueError("success needs exact execution units")
-        elif outcome["kind"] not in ("decode", "evaluation", "budget_exhausted"):
-            raise ValueError("unknown failure kind")
-        if outcome["budget"] is not None:
-            for field in ("cpu", "mem"):
-                value = outcome["budget"][field]
-                if type(value) is not str or str(int(value)) != value or int(value) < 0:
-                    raise ValueError("execution units must be nonnegative decimal strings")
-    elif status not in ("unsupported", "infrastructure_error"):
-        raise ValueError("unknown outcome status")
+            try:
+                if os.name == "posix":
+                    # Descendants can keep the pipes open even after their parent exits.
+                    os.killpg(process.pid, signal.SIGKILL)
+                elif process.poll() is None:
+                    process.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                # Keep cleanup bounded even if the OS cannot immediately reap it.
+                pass
+            for worker, pipe in ((self.writer, process.stdin), (self.reader, process.stdout)):
+                if worker is not None:
+                    worker.join(timeout=0.1)
+                # A detached descendant may still own a pipe. Never wait on its
+                # buffered-I/O lock while closing; the daemon owns cleanup then.
+                if worker is None or not worker.is_alive():
+                    with suppress(OSError):
+                        pipe.close()
+            self.responses = queue.Queue(maxsize=4)
 
 
 def run(args):
     cases = load_cases(args.corpus)
+    # Reject invalid corpora before launching any evaluator or writing a partial report.
+    requests = [make_request(case) for case in cases]
     engines = []
     for specification in args.engine:
         name, command = specification.split("=", 1)
         if not name or not command or any(engine.name == name for engine in engines):
             raise ValueError("engine names must be nonempty and unique")
         engines.append(Engine(name, command, args.timeout))
+    if not engines:
+        raise ValueError("at least one engine is required")
+    configuration = {"engines": {engine.name: engine.command for engine in engines},
+                     "timeout": args.timeout, "failure_costs": args.failure_costs,
+                     "allow_unsupported": args.allow_unsupported}
     counts = Counter()
     artifacts = Path(args.artifacts)
     artifacts.mkdir(parents=True, exist_ok=True)
     records = []
     try:
-        for case in cases:
-            request = make_request(case)
+        for case, request in zip(cases, requests):
             responses = {engine.name: engine.evaluate(request) for engine in engines}
             checks = []
             if case.get("unavailable"):
@@ -204,7 +224,8 @@ def run(args):
             category = max((c for c, _ in checks), key={"pass": 0, "unsupported": 1, "mismatch": 2, "error": 3}.get)
             counts[category] += 1
             record = {"id": case["id"], "category": category, "checks": checks,
-                      "request": request, "responses": responses, "case": case}
+                      "request": request, "responses": responses, "case": case,
+                      "configuration": configuration}
             records.append(record)
             if category in ("mismatch", "error"):
                 name = hashlib.sha256(case["id"].encode()).hexdigest()[:16]
@@ -217,7 +238,8 @@ def run(args):
     summary = {key: counts[key] for key in ("pass", "mismatch", "error", "unsupported")}
     summary["total"] = len(cases)
     summary["complete"] = counts["pass"] == len(cases)
-    (artifacts / "report.json").write_text(json.dumps({"summary": summary, "cases": records}, indent=2) + "\n")
+    (artifacts / "report.json").write_text(json.dumps({"summary": summary, "configuration": configuration,
+                                                      "cases": records}, indent=2) + "\n")
     print(json.dumps(summary, sort_keys=True))
     return int(bool(counts["mismatch"] or counts["error"] or (counts["unsupported"] and not args.allow_unsupported)))
 
@@ -232,6 +254,6 @@ if __name__ == "__main__":
     parser.add_argument("--failure-costs", action="store_true", help="also compare partial costs on failures")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
-    if args.timeout <= 0:
-        parser.error("timeout must be positive")
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
+        parser.error("timeout must be finite and positive")
     raise SystemExit(run(args))

@@ -115,9 +115,10 @@ class Engine:
 
     def evaluate(self, request):
         try:
-            encoded = json.dumps(request, separators=(",", ":")).encode() + b"\n"
+            encoded = json.dumps(request, separators=(",", ":")).encode()
             if len(encoded) > MAX_REQUEST:
                 raise ValueError("request exceeds the transport size limit")
+            encoded += b"\n"
             if self.process is None:
                 self.start()
             # A worker may stop reading stdin as well as stdout. Bound both operations.

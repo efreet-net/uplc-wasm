@@ -12,7 +12,7 @@ import unittest
 from argparse import Namespace
 
 from conformance import Engine, ROOT, compare, compare_golden, load_cases, make_request, run, validate_outcome
-from protocol import loads, validate_request, validate_response, validate_term
+from protocol import MAX_REQUEST, loads, validate_request, validate_response, validate_term
 
 
 def success(value="9007199254740993", cpu="123"):
@@ -153,6 +153,26 @@ class ProcessTests(unittest.TestCase):
             result = engine.evaluate({"id": "blocked-write", "payload": "x" * 1000000})
             self.assertEqual(result["outcome"]["status"], "infrastructure_error")
             self.assertLess(time.monotonic() - started, 1.5)
+        finally:
+            engine.close()
+
+    def test_request_size_limit_excludes_the_framing_lf(self):
+        response = dict(schema_version=1, id="size-limit", engine="test", revision="test", outcome=success())
+        script = "import sys\nfor line in sys.stdin.buffer:\n print(" + repr(json.dumps(response)) + ",flush=True)"
+        engine = self.engine(script, timeout=3)
+        request = {"id": "size-limit", "payload": "λ"}
+        # The limit applies to bytes of the actual serialized JSON, including
+        # the runner's Unicode escapes, not to the Python payload's length.
+        serialized = json.dumps(request, separators=(",", ":")).encode()
+        request["payload"] += " " * (MAX_REQUEST - len(serialized))
+        self.assertEqual(len(json.dumps(request, separators=(",", ":")).encode()), MAX_REQUEST)
+        try:
+            self.assertEqual(engine.evaluate(request)["outcome"], success())
+            request["payload"] += " "
+            result = engine.evaluate(request)["outcome"]
+            self.assertEqual(result["status"], "infrastructure_error")
+            self.assertEqual(result["diagnostic"], "request exceeds the transport size limit")
+            self.assertIsNone(engine.process)
         finally:
             engine.close()
 

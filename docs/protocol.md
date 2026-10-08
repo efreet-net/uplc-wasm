@@ -2,11 +2,20 @@
 
 One request and one response per line. Adapters keep stdout reserved for JSON;
 diagnostics go to stderr. The runner bounds requests/responses with deadlines and
-isolates interpreter crashes in child processes. The Rust server limits a request
-to 8 MiB and the runner limits a response to 16 MiB. Wasm exports the equivalent
+isolates interpreter crashes in child processes. The request limit is 8 MiB of
+UTF-8 JSON body bytes, excluding the native JSONL framing LF; the runner limits
+a response to 16 MiB. Wasm exports the equivalent
 `evaluate_json(string): string` API.
 Response lines must end with a newline. On POSIX the runner kills the process
 group on failure, including children that inherit the evaluator's pipes.
+
+The native server also accepts a final request body terminated by EOF. It reads
+at most 8 MiB plus one framing/lookahead byte for a request. An overlong body
+terminates the native process with an error and no response for that request;
+it does not drain the remaining input. The Python runner rejects overlong bodies
+before sending them. Wasm receives a complete body and returns an infrastructure
+error for an overlong input. Sizes count UTF-8 bytes, including JSON whitespace,
+not Unicode characters; only the native framing LF is excluded.
 
 ## Request
 

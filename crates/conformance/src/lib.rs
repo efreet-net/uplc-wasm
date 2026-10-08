@@ -6,6 +6,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub const SCHEMA_VERSION: u32 = 1;
+/// Maximum UTF-8 bytes in the JSON body, excluding a native JSONL framing LF.
 pub const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,12 +235,30 @@ pub fn serve(
     revision: &str,
     eval: impl Fn(&Request) -> Outcome + std::panic::RefUnwindSafe,
 ) -> std::io::Result<()> {
-    use std::io::{BufRead, Read, Write};
     let stdin = std::io::stdin();
-    let mut input = stdin.lock();
-    let mut output = std::io::stdout().lock();
+    let stdout = std::io::stdout();
+    serve_streams(
+        &mut stdin.lock(),
+        &mut stdout.lock(),
+        engine,
+        revision,
+        eval,
+    )
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn serve_streams(
+    input: &mut impl std::io::BufRead,
+    output: &mut impl std::io::Write,
+    engine: &str,
+    revision: &str,
+    eval: impl Fn(&Request) -> Outcome + std::panic::RefUnwindSafe,
+) -> std::io::Result<()> {
+    use std::io::{BufRead, Read};
     loop {
         let mut line = Vec::new();
+        // One lookahead byte distinguishes a maximum-sized body followed by LF
+        // from an overlong body. Never drain the rest of an overlong line.
         let count = input
             .by_ref()
             .take((MAX_REQUEST_BYTES + 1) as u64)
@@ -247,7 +266,10 @@ pub fn serve(
         if count == 0 {
             break;
         }
-        if count > MAX_REQUEST_BYTES {
+        if line.last() == Some(&b'\n') {
+            line.pop();
+        }
+        if line.len() > MAX_REQUEST_BYTES {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "JSONL request too large",
@@ -268,6 +290,102 @@ pub fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn maximum_request_body() -> String {
+        let parameters = vec!["0".to_owned()];
+        let request = Request {
+            schema_version: 1,
+            id: "body-size-boundary".into(),
+            program: Program::Flat { hex: "".into() },
+            profile: Profile {
+                id: "multibyte-λ".into(),
+                language: Language::PlutusV3,
+                protocol_major: 11,
+                cost_model: CostModel {
+                    sha256: parameters_hash(&parameters),
+                    parameters,
+                },
+            },
+            mode: Mode::Restricting {
+                budget: Budget::new(0, 0),
+            },
+        };
+        let mut body = serde_json::to_string(&request).unwrap();
+        body.push_str(&" ".repeat(MAX_REQUEST_BYTES - body.len()));
+        assert_eq!(body.len(), MAX_REQUEST_BYTES);
+        assert_eq!(body.chars().count(), MAX_REQUEST_BYTES - 1);
+        body
+    }
+
+    fn transport_success(_: &Request) -> Outcome {
+        Outcome::Success {
+            term: serde_json::json!(["constant", ["unit"]]),
+            budget: Budget::new(0, 0),
+            traces: vec![],
+        }
+    }
+
+    #[test]
+    fn dispatch_request_limit_counts_utf8_body_bytes() {
+        let mut body = maximum_request_body();
+        let response: Response =
+            serde_json::from_str(&dispatch(&body, "test", "test", transport_success)).unwrap();
+        assert_eq!(response.id, "body-size-boundary");
+        assert!(matches!(response.outcome, Outcome::Success { .. }));
+
+        body.push(' ');
+        // This has exactly MAX_REQUEST_BYTES Unicode scalar values, but one
+        // more UTF-8 byte. It must fail before invoking evaluation.
+        assert_eq!(body.chars().count(), MAX_REQUEST_BYTES);
+        let response: Response = serde_json::from_str(&dispatch(&body, "test", "test", |_| {
+            panic!("oversized request must not evaluate")
+        }))
+        .unwrap();
+        assert!(matches!(
+            response.outcome,
+            Outcome::InfrastructureError { .. }
+        ));
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn native_request_limit_excludes_lf_and_accepts_final_eof_body() {
+        let body = maximum_request_body();
+        let mut input = std::io::Cursor::new(format!("{body}\n{body}").into_bytes());
+        let mut output = Vec::new();
+        serve_streams(&mut input, &mut output, "test", "test", transport_success).unwrap();
+        assert_eq!(input.position(), (2 * MAX_REQUEST_BYTES + 1) as u64);
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.ends_with('\n'));
+        let responses: Vec<Response> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(responses.len(), 2);
+        for response in responses {
+            assert_eq!(response.id, "body-size-boundary");
+            assert!(matches!(response.outcome, Outcome::Success { .. }));
+        }
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn native_oversized_body_terminates_after_bounded_lookahead() {
+        for ending in ["", "\n{}\n"] {
+            let mut body = maximum_request_body();
+            body.push(' ');
+            body.push_str(ending);
+            let mut input = std::io::Cursor::new(body.into_bytes());
+            let mut output = Vec::new();
+            let error = serve_streams(&mut input, &mut output, "test", "test", |_| {
+                panic!("oversized request must not evaluate")
+            })
+            .unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert_eq!(input.position(), (MAX_REQUEST_BYTES + 1) as u64);
+            assert!(output.is_empty());
+        }
+    }
 
     #[test]
     fn budgets_preserve_integers_beyond_javascript_precision() {

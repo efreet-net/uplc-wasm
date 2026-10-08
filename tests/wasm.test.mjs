@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import test from 'node:test';
-import { requests, nativeResponses, assertExpectedOutcomes } from './requests.mjs';
+import { root, requests, nativeResponses, assertExpectedOutcomes } from './requests.mjs';
 
 const require = createRequire(import.meta.url);
 const { evaluate_json } = require('../pkg/node/uplc_wasm.js');
@@ -43,4 +44,43 @@ test('unrepresentable consumed totals return budget exhaustion with a null budge
   assert.equal(outcome.status, 'failure');
   assert.equal(outcome.kind, 'budget_exhausted');
   assert.equal(outcome.budget, null);
+});
+
+test('native and release Wasm accept the exact UTF-8 body limit and reject one byte more', () => {
+  const limit = 8 * 1024 * 1024;
+  const request = JSON.parse(requests[0]);
+  request.id = 'abi/transport-size';
+  request.profile.id = 'multibyte-λ';
+  let body = JSON.stringify(request);
+  body += ' '.repeat(limit - Buffer.byteLength(body, 'utf8'));
+  assert.equal(Buffer.byteLength(body, 'utf8'), limit);
+  assert.equal(body.length, limit - 1);
+  const wasm = JSON.parse(evaluate_json(body));
+  assert.deepEqual(wasm.outcome, {
+    status: 'success', term: ['constant', ['integer', '0']],
+    budget: { cpu: '16100', mem: '200' }, traces: [],
+  });
+  const native = input => spawnSync(process.env.UPLC_NATIVE || root + 'target/debug/uplc-native', [], {
+    input, encoding: 'utf8', timeout: 10000, maxBuffer: 16 * 1024 * 1024,
+  });
+  for (const framing of ['\n', '']) {
+    // LF framing is separate from the body; an EOF-terminated final body is
+    // accepted too. Both responses must match the actual release Wasm export.
+    const result = native(body + framing);
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(result.stdout.endsWith('\n'));
+    assert.deepEqual(JSON.parse(result.stdout), wasm);
+  }
+  body += ' ';
+  assert.equal(body.length, limit); // Unicode character count is insufficient.
+  assert.equal(Buffer.byteLength(body, 'utf8'), limit + 1);
+  assert.equal(JSON.parse(evaluate_json(body)).outcome.status, 'infrastructure_error');
+  // An overlong native frame terminates without draining or responding. This
+  // deliberate framing policy differs from a complete-body Wasm error envelope.
+  const oversized = native(body);
+  assert.ifError(oversized.error);
+  assert.equal(oversized.status, 1);
+  assert.equal(oversized.stdout, '');
+  assert.match(oversized.stderr, /JSONL request too large/);
 });

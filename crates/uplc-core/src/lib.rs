@@ -4,6 +4,8 @@
 //! deliberately depends on neither reference implementation. Until implemented,
 //! requests return Unsupported, which is never a conformance pass.
 
+pub mod cost;
+
 use uplc_conformance::{Outcome, Request};
 
 pub mod ast;

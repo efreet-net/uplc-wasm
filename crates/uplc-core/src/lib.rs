@@ -11,6 +11,7 @@ use uplc_conformance::{Outcome, Request};
 pub mod ast;
 pub mod error;
 pub mod limits;
+pub mod machine;
 
 pub fn evaluate(request: &Request) -> Outcome {
     if let Err(error) = request.validate() {

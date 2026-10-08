@@ -2,9 +2,9 @@
 //!
 //! Terms live in a flat arena: malformed or deep input cannot trigger recursive
 //! AST destruction. The indices are arena locations, while `Var` contains the
-//! UPLC one-based De Bruijn index. A zero variable index can be decoded and is an
-//! open-term runtime error if evaluated; it cannot be represented by the wire
-//! protocol's normalized-term schema.
+//! UPLC one-based De Bruijn index. A directly constructed AST can contain a zero
+//! index, which is an open-term runtime error if evaluated. The raw decoder and
+//! the wire protocol's normalized-term schema reject zero variable indices.
 
 use num_bigint::BigInt;
 use serde_json::{Value, json};

@@ -10,6 +10,7 @@ use uplc_conformance::{Outcome, Request};
 
 pub mod ast;
 pub mod error;
+pub mod flat;
 pub mod limits;
 
 pub fn evaluate(request: &Request) -> Outcome {

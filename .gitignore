@@ -1,0 +1,10 @@
+/target/
+**/target/
+/.cache/
+/artifacts/
+/pkg/
+/node_modules/
+**/__pycache__/
+*.pyc
+/fuzz/corpus/
+/fuzz/artifacts/

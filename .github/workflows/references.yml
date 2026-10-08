@@ -1,0 +1,62 @@
+name: Reference fidelity
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  differential:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 'nightly-2026-09-04'
+      - run: rustup toolchain install 1.96.0 --profile minimal
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            .cache/upstreams
+            tools/oracle-aiken/target
+            tools/oracle-amaru/target
+          key: references-${{ runner.os }}-${{ hashFiles('upstreams.lock.json', '**/Cargo.lock') }}
+      - run: make references native
+      - run: make reference-check
+      - run: python3 tools/generate_cases.py --seed 42 --count 1000
+      - name: Generated cases against both references
+        run: >-
+          python3 tools/conformance.py --corpus .cache/generated.jsonl
+          --engine aiken=tools/oracle-aiken/target/debug/oracle-aiken
+          --engine amaru=tools/oracle-amaru/target/debug/oracle-amaru
+          --artifacts artifacts/generated
+      - name: Candidate coverage against both references
+        run: >-
+          python3 tools/conformance.py --engine native=target/debug/uplc-native
+          --engine aiken=tools/oracle-aiken/target/debug/oracle-aiken
+          --engine amaru=tools/oracle-amaru/target/debug/oracle-amaru
+          --allow-unsupported --artifacts artifacts/candidate
+      - name: Import full pinned corpus
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: python3 tools/import_plutus.py --output artifacts/plutus.jsonl
+      - name: Full corpus audit
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: >-
+          python3 tools/conformance.py --corpus artifacts/plutus.jsonl
+          --engine aiken=tools/oracle-aiken/target/debug/oracle-aiken
+          --engine amaru=tools/oracle-amaru/target/debug/oracle-amaru
+          --allow-unsupported --artifacts artifacts/full-corpus
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fidelity-results
+          path: artifacts/

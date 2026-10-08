@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+
+[package]
+name = "oracle-amaru"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+[dependencies]
+amaru-uplc = { path = "../../.cache/upstreams/amaru/crates/amaru-uplc" }
+amaru-kernel = { path = "../../.cache/upstreams/amaru/crates/amaru-kernel" }
+uplc-conformance = { path = "../../crates/conformance" }
+serde_json = "1.0.150"
+hex = "0.4.3"

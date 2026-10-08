@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+
+[package]
+name = "oracle-aiken"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+uplc = { path = "../../.cache/upstreams/aiken/crates/uplc" }
+uplc-conformance = { path = "../../crates/conformance" }
+pallas-primitives = "0.35.0"
+serde_json = "1.0.150"
+hex = "0.4.3"

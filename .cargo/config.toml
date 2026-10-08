@@ -1,0 +1,2 @@
+[alias]
+candidate = "run --locked --quiet -p uplc-core --bin uplc-native --"

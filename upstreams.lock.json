@@ -1,0 +1,17 @@
+{
+  "aiken": {
+    "repository": "aiken-lang/aiken",
+    "revision": "b5c34839ee33a2d608a071f3679410f63ad68bae",
+    "archive_sha256": "a955716c25bae7ba99d891aff3d2909f1e0bbb03f563099259f1f44ea106e03e"
+  },
+  "amaru": {
+    "repository": "pragma-org/amaru",
+    "revision": "34a453005bcaaf837ee73bd996b99eab8ef92961",
+    "archive_sha256": "e2cca4e0c181dbc017c1c5e9ef56637425d0fd429a27e58228452bc4729cd64d"
+  },
+  "plutus": {
+    "repository": "IntersectMBO/plutus",
+    "revision": "5f785edeac0d1d89622d44344fdda07ef48e8c73",
+    "archive_sha256": "bec43034c4d936e9e9cef10135d429eaa42b1f8602f6ea3cc48edfd510b5641f"
+  }
+}

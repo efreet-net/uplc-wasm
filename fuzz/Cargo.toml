@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+
+[package]
+name = "uplc-wasm-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+uplc-core = { path = "../crates/uplc-core" }
+uplc-conformance = { path = "../crates/conformance" }
+serde_json = "1"
+hex = "0.4"
+
+[[bin]]
+name = "wire"
+path = "fuzz_targets/wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "flat"
+path = "fuzz_targets/flat.rs"
+test = false
+doc = false
+bench = false

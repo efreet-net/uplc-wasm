@@ -1,0 +1,12 @@
+[package]
+name = "uplc-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+uplc-conformance = { path = "../conformance" }
+
+[lints]
+workspace = true

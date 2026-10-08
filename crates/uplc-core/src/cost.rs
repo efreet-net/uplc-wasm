@@ -2,9 +2,10 @@
 //!
 //! There are no default coefficients. Every model is constructed from the supplied
 //! 350-entry ledger parameter vector. This module does not implement builtin costs.
-//! Charges are checked immediately, before the associated machine action; this
-//! differs from the references' batching of partial failure costs. Successful costs
-//! are unchanged. An explicit UPLC error has no machine charge of its own.
+//! Each submitted charge is checked immediately. The CEK machine submits startup
+//! directly and otherwise batches up to 200 compute events in the official step
+//! order; see [`crate::machine`]. An explicit error has no charge of its own and
+//! does not flush an unfinished event batch.
 //!
 //! A failed charge includes the entire attempted CPU and memory charge. Totals use
 //! checked i128 arithmetic, independent of host pointer size. If either attempted
@@ -200,6 +201,17 @@ impl BudgetMeter {
     /// exhaustion. Equality with either limit is allowed. Negative costs are an
     /// API error, do not change consumption, and are never a semantic UPLC error.
     pub fn charge(&mut self, cost: ExecutionBudget) -> Result<(), BudgetError> {
+        self.charge_repeated(cost, 1)
+    }
+
+    /// Submit a batch of identical events. Multiplication happens in checked
+    /// i128 arithmetic before addition or comparison, so an overflowing i64 batch
+    /// is budget exhaustion with no representable consumed budget, never wrapping.
+    pub fn charge_repeated(
+        &mut self,
+        cost: ExecutionBudget,
+        count: u32,
+    ) -> Result<(), BudgetError> {
         if let Some(error) = self.terminal {
             return Err(error);
         }
@@ -214,13 +226,18 @@ impl BudgetMeter {
             });
         }
 
-        // Before a successful charge both totals are <= i64::MAX, and a charge
-        // is <= i64::MAX, so i128 is ample even for the first exhausted attempt.
-        // Check nevertheless: neither debug nor release arithmetic may wrap.
-        let Some(cpu) = self.cpu.checked_add(i128::from(cost.cpu)) else {
+        // Each coefficient is at most i64::MAX, count is u32, and the prior
+        // successful total is at most i64::MAX. Check both operations regardless.
+        let Some(cpu) = i128::from(cost.cpu)
+            .checked_mul(i128::from(count))
+            .and_then(|charge| self.cpu.checked_add(charge))
+        else {
             return self.fail(BudgetError::Overflow);
         };
-        let Some(mem) = self.mem.checked_add(i128::from(cost.mem)) else {
+        let Some(mem) = i128::from(cost.mem)
+            .checked_mul(i128::from(count))
+            .and_then(|charge| self.mem.checked_add(charge))
+        else {
             return self.fail(BudgetError::Overflow);
         };
         self.cpu = cpu;
@@ -459,6 +476,65 @@ mod tests {
                 Err(BudgetError::NegativeCharge { dimension })
             );
             assert_eq!(meter.consumed(), Some(ExecutionBudget { cpu: 0, mem: 0 }));
+        }
+    }
+
+    #[test]
+    fn repeated_charges_use_exact_widened_multiplication() {
+        let mut meter = BudgetMeter::new(ExecutionBudget {
+            cpu: 600,
+            mem: 1_000,
+        })
+        .unwrap();
+        assert_eq!(
+            meter.charge_repeated(ExecutionBudget { cpu: 3, mem: 5 }, 200),
+            Ok(())
+        );
+        assert_eq!(
+            meter.consumed(),
+            Some(ExecutionBudget {
+                cpu: 600,
+                mem: 1_000,
+            })
+        );
+        assert_eq!(
+            meter.charge_repeated(ExecutionBudget { cpu: 3, mem: 5 }, 0),
+            Ok(())
+        );
+        assert_eq!(
+            meter.charge_repeated(ExecutionBudget { cpu: 3, mem: 5 }, 2),
+            Err(BudgetError::Exhausted)
+        );
+        assert_eq!(
+            meter.consumed(),
+            Some(ExecutionBudget {
+                cpu: 606,
+                mem: 1_010,
+            })
+        );
+
+        for cost in [
+            ExecutionBudget {
+                cpu: i64::MAX,
+                mem: 1,
+            },
+            ExecutionBudget {
+                cpu: 1,
+                mem: i64::MAX,
+            },
+        ] {
+            let mut meter = BudgetMeter::new(ExecutionBudget {
+                cpu: i64::MAX,
+                mem: i64::MAX,
+            })
+            .unwrap();
+            assert_eq!(
+                meter.charge_repeated(cost, u32::MAX),
+                Err(BudgetError::Overflow)
+            );
+            assert_eq!(meter.cpu, i128::from(cost.cpu) * i128::from(u32::MAX));
+            assert_eq!(meter.mem, i128::from(cost.mem) * i128::from(u32::MAX));
+            assert_eq!(meter.consumed(), None);
         }
     }
 }

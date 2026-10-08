@@ -9,6 +9,35 @@ use uplc_conformance::{Budget, FailureKind, Language, Mode, Outcome, Program as 
 
 const REVISION: &str = "b5c34839ee33a2d608a071f3679410f63ad68bae";
 
+/// Encode a parsed source without evaluating it. The bytes constant is a
+/// transport envelope for the fixture builder, not an evaluation result.
+fn encode_flat(request: &Request) -> Outcome {
+    if !matches!(request.profile.language, Language::PlutusV3)
+        || request.profile.protocol_major != 11
+    {
+        return Outcome::unsupported("initial encoder profile: PlutusV3 / protocol 11");
+    }
+    let Input::UplcText { source } = &request.program else {
+        return Outcome::unsupported("--encode-flat requires textual UPLC input");
+    };
+    let program = match parser::program(source) {
+        Ok(program) => program,
+        Err(error) => return Outcome::failure(FailureKind::Decode, error.to_string()),
+    };
+    let program = match program.to_debruijn() {
+        Ok(program) => program,
+        Err(error) => return Outcome::failure(FailureKind::Evaluation, error.to_string()),
+    };
+    match program.to_flat() {
+        Ok(bytes) => Outcome::Success {
+            term: json!(["constant", ["bytes", hex::encode(bytes)]]),
+            budget: Budget::new(0, 0),
+            traces: vec![],
+        },
+        Err(error) => Outcome::failure(FailureKind::Decode, error.to_string()),
+    }
+}
+
 fn evaluate(request: &Request, normalize_only: bool) -> Outcome {
     let Mode::Restricting { budget } = &request.mode else {
         return Outcome::unsupported(
@@ -169,7 +198,11 @@ fn type_name(typ: &Type, depth: usize) -> Result<Value, String> {
 }
 
 fn main() -> std::io::Result<()> {
-    let normalize_only = std::env::args().nth(1).as_deref() == Some("--normalize");
+    let mode = std::env::args().nth(1);
+    if mode.as_deref() == Some("--encode-flat") {
+        return uplc_conformance::serve("aiken-flat-encoder", REVISION, encode_flat);
+    }
+    let normalize_only = mode.as_deref() == Some("--normalize");
     uplc_conformance::serve(
         if normalize_only {
             "aiken-normalizer"

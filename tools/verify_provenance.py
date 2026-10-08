@@ -6,6 +6,7 @@ import re
 
 from conformance import ROOT, load_cases, make_request
 from upstreams import verify_source
+from build_milestone_corpus import verify_committed
 
 
 def verify():
@@ -42,6 +43,8 @@ def verify():
             raise ValueError(f"seed budget differs from upstream: {case['id']}")
         checked += 1
     print(f"verified 350 profile coefficients and {checked} vendored seed input/result/budget triples")
+    counts = verify_committed(sources={"plutus": plutus})
+    print("verified milestone fixture provenance: " + json.dumps(counts, sort_keys=True))
 
 
 if __name__ == "__main__":

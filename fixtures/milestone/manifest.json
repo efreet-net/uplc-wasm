@@ -1,0 +1,615 @@
+{
+  "schema_version": 1,
+  "scope": "First raw Flat CEK milestone. Explicit selected official cases, manually derived probes, and separate decoder/unsupported/failure-policy audits. Existing full corpus is unchanged; textual parser, escaped-string disagreements, arrays, builtins, constr/case and complex constants are not promoted to this strict supported corpus.",
+  "cost_derivation": "One startup plus explicitly counted CEK compute visits. Official Haskell Cek/Internal.hs defines BVar/BConst/BLamAbs/BDelay/BForce/BApply; return transitions and result discharge add no steps. Profile vector positions are explicit in build_milestone_corpus.py; official successful budgets remain authoritative.",
+  "official": [
+    "builtin/constant/integer/integer-01/integer-01.uplc",
+    "builtin/constant/integer/integer-02/integer-02.uplc",
+    "builtin/constant/integer/integer-03/integer-03.uplc",
+    "builtin/constant/integer/integer-04/integer-04.uplc",
+    "builtin/constant/integer/integer-05/integer-05.uplc",
+    "builtin/constant/integer/integer-06/integer-06.uplc",
+    "builtin/constant/integer/integer-07/integer-07.uplc",
+    "builtin/constant/integer/integer-08/integer-08.uplc",
+    "builtin/constant/bool/False/False.uplc",
+    "builtin/constant/bool/True/True.uplc",
+    "builtin/constant/bytestring/bytestring-01/bytestring-01.uplc",
+    "builtin/constant/string/string-01/string-01.uplc",
+    "builtin/constant/string/string-02/string-02.uplc",
+    "builtin/constant/string/string-03/string-03.uplc",
+    "builtin/constant/unit/unit/unit.uplc",
+    "term/app/app-1/app-1.uplc",
+    "term/app/app-2/app-2.uplc",
+    "term/app/app-3/app-3.uplc",
+    "term/app/app-4/app-4.uplc",
+    "term/app/app-5/app-5.uplc",
+    "term/app/app-6/app-6.uplc",
+    "term/app/app-7/app-7.uplc",
+    "term/app/app-8/app-8.uplc",
+    "term/app/app-9/app-9.uplc",
+    "term/delay/delay-error-1/delay-error-1.uplc",
+    "term/delay/delay-error-2/delay-error-2.uplc",
+    "term/delay/delay-lam/delay-lam.uplc",
+    "term/force/force-2/force-2.uplc",
+    "term/force/force-3/force-3.uplc",
+    "term/force/force-4/force-4.uplc",
+    "term/lam/lam-1/lam-1.uplc",
+    "term/lam/lam-2/lam-2.uplc",
+    "term/closure/closure.uplc",
+    "term/nonFunctionalApplication/nonFunctionalApplication.uplc"
+  ],
+  "probes": [
+    {
+      "id": "empty-bytes",
+      "source": "(program 1.0.0 (con bytestring #))\n",
+      "expected_source": "(program 1.0.0 (con bytestring #))\n",
+      "expected": {
+        "status": "success",
+        "term": [
+          "constant",
+          [
+            "bytes",
+            ""
+          ]
+        ]
+      },
+      "steps": {
+        "startup": 1,
+        "constant": 1
+      },
+      "derivation": "A primitive constant is returned unchanged after one constant compute step."
+    },
+    {
+      "id": "bytes-across-255-byte-chunk",
+      "source": "(program 1.0.0 (con bytestring #000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff))\n",
+      "expected_source": "(program 1.0.0 (con bytestring #000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff))\n",
+      "expected": {
+        "status": "success",
+        "term": [
+          "constant",
+          [
+            "bytes",
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"
+          ]
+        ]
+      },
+      "steps": {
+        "startup": 1,
+        "constant": 1
+      },
+      "derivation": "256 bytes cross the Flat 255-byte chunk boundary; constant payload length does not change CEK constant cost."
+    },
+    {
+      "id": "integer-above-js-precision",
+      "source": "(program 1.0.0 (con integer 9007199254740993))\n",
+      "expected_source": "(program 1.0.0 (con integer 9007199254740993))\n",
+      "expected": {
+        "status": "success",
+        "term": [
+          "constant",
+          [
+            "integer",
+            "9007199254740993"
+          ]
+        ]
+      },
+      "steps": {
+        "startup": 1,
+        "constant": 1
+      },
+      "derivation": "A primitive integer is returned exactly, beyond IEEE-754 integer precision."
+    },
+    {
+      "id": "integer-below-js-precision",
+      "source": "(program 1.0.0 (con integer -9007199254740993))\n",
+      "expected_source": "(program 1.0.0 (con integer -9007199254740993))\n",
+      "expected": {
+        "status": "success",
+        "term": [
+          "constant",
+          [
+            "integer",
+            "-9007199254740993"
+          ]
+        ]
+      },
+      "steps": {
+        "startup": 1,
+        "constant": 1
+      },
+      "derivation": "Negative arbitrary-precision integer, with signed zig-zag encoding."
+    },
+    {
+      "id": "captured-delay",
+      "source": "(program 1.0.0 [(lam x (delay x)) (con integer 13)])\n",
+      "expected_source": "(program 1.0.0 (delay (con integer 13)))\n",
+      "expected": {
+        "status": "success",
+        "term": [
+          "delay",
+          [
+            "constant",
+            [
+              "integer",
+              "13"
+            ]
+          ]
+        ]
+      },
+      "steps": {
+        "startup": 1,
+        "apply": 1,
+        "lambda": 1,
+        "constant": 1,
+        "delay": 1
+      },
+      "derivation": "Apply evaluates the lambda and argument, then delay captures x=13; discharge substitutes x without forcing the delay."
+    },
+    {
+      "id": "force-captured-delay-after-shadow",
+      "source": "(program 1.0.0 [(lam x [(lam d [(lam x (force d)) (con integer 2)]) (delay x)]) (con integer 1)])\n",
+      "expected_source": "(program 1.0.0 (con integer 1))\n",
+      "expected": {
+        "status": "success",
+        "term": [
+          "constant",
+          [
+            "integer",
+            "1"
+          ]
+        ]
+      },
+      "steps": {
+        "startup": 1,
+        "apply": 3,
+        "lambda": 3,
+        "constant": 2,
+        "delay": 1,
+        "force": 1,
+        "var": 2
+      },
+      "derivation": "Three applications enter three lambdas. The delayed x keeps its x=1 environment despite the later x=2 binding. Compute visits d then captured x."
+    },
+    {
+      "id": "captured-function-binders",
+      "source": "(program 1.0.0 [(lam f (lam z f)) (lam x (lam y x))])\n",
+      "expected_source": "(program 1.0.0 (lam z (lam x (lam y x))))\n",
+      "expected": {
+        "status": "success",
+        "term": [
+          "lambda",
+          [
+            "lambda",
+            [
+              "lambda",
+              [
+                "var",
+                "2"
+              ]
+            ]
+          ]
+        ]
+      },
+      "steps": {
+        "startup": 1,
+        "apply": 1,
+        "lambda": 3
+      },
+      "derivation": "The outer lambda, argument lambda x, and returned lambda z are evaluated. Discharge inserts the captured function while preserving its two local binders; lambda y is not evaluated."
+    },
+    {
+      "id": "lexical-function-after-shadow",
+      "source": "(program 1.0.0 [(lam x [(lam f [(lam x [f (con unit ())]) (con integer 2)]) (lam ignored x)]) (con integer 1)])\n",
+      "expected_source": "(program 1.0.0 (con integer 1))\n",
+      "expected": {
+        "status": "success",
+        "term": [
+          "constant",
+          [
+            "integer",
+            "1"
+          ]
+        ]
+      },
+      "steps": {
+        "startup": 1,
+        "apply": 4,
+        "lambda": 4,
+        "constant": 3,
+        "var": 2
+      },
+      "derivation": "Four applications evaluate four lambdas, constants 1,2,unit, and variables f and captured x. Calling f after rebinding x returns its lexical x=1."
+    },
+    {
+      "id": "unreduced-lambda-body",
+      "source": "(program 1.0.0 (lam x [(lam y y) x]))\n",
+      "expected_source": "(program 1.0.0 (lam x [(lam y y) x]))\n",
+      "expected": {
+        "status": "success",
+        "term": [
+          "lambda",
+          [
+            "apply",
+            [
+              "lambda",
+              [
+                "var",
+                "1"
+              ]
+            ],
+            [
+              "var",
+              "1"
+            ]
+          ]
+        ]
+      },
+      "steps": {
+        "startup": 1,
+        "lambda": 1
+      },
+      "derivation": "CEK returns a lambda without computing its body; normalization preserves the application and local De Bruijn indices."
+    },
+    {
+      "id": "force-delay-constant",
+      "source": "(program 1.0.0 (force (delay (con integer 42))))\n",
+      "expected_source": "(program 1.0.0 (con integer 42))\n",
+      "expected": {
+        "status": "success",
+        "term": [
+          "constant",
+          [
+            "integer",
+            "42"
+          ]
+        ]
+      },
+      "steps": {
+        "startup": 1,
+        "force": 1,
+        "delay": 1,
+        "constant": 1
+      },
+      "derivation": "Force computes a delay then its body: exactly force, delay and constant steps."
+    },
+    {
+      "id": "shadowed-binder",
+      "source": "(program 1.0.0 [(lam x [(lam x x) (con integer 22)]) (con integer 11)])\n",
+      "expected_source": "(program 1.0.0 (con integer 22))\n",
+      "expected": {
+        "status": "success",
+        "term": [
+          "constant",
+          [
+            "integer",
+            "22"
+          ]
+        ]
+      },
+      "steps": {
+        "startup": 1,
+        "apply": 2,
+        "lambda": 2,
+        "constant": 2,
+        "var": 1
+      },
+      "derivation": "The innermost De Bruijn index 1 selects x=22 rather than outer x=11."
+    },
+    {
+      "id": "version-1-1-primitive",
+      "source": "(program 1.1.0 (con bool True))\n",
+      "expected_source": "(program 1.1.0 (con bool True))\n",
+      "expected": {
+        "status": "success",
+        "term": [
+          "constant",
+          [
+            "bool",
+            true
+          ]
+        ]
+      },
+      "steps": {
+        "startup": 1,
+        "constant": 1
+      },
+      "derivation": "PlutusV3/PV11 permits UPLC 1.1.0; primitive CEK rules and startup cost are unchanged."
+    },
+    {
+      "id": "explicit-error",
+      "source": "(program 1.0.0 (error))\n",
+      "expected": {
+        "status": "failure",
+        "kind": "evaluation"
+      },
+      "derivation": "Error raises evaluation failure; it has no machine-step cost. Failure budget is intentionally unspecified because references batch prior charges."
+    },
+    {
+      "id": "forced-error",
+      "source": "(program 1.0.0 (force (delay (error))))\n",
+      "expected": {
+        "status": "failure",
+        "kind": "evaluation"
+      },
+      "derivation": "Force enters the delayed Error and raises evaluation failure."
+    },
+    {
+      "id": "strict-argument-error",
+      "source": "(program 1.0.0 [(lam ignored (con unit ())) (error)])\n",
+      "expected": {
+        "status": "failure",
+        "kind": "evaluation"
+      },
+      "derivation": "Call-by-value evaluates the argument even when the lambda ignores it; Error fails before the body."
+    },
+    {
+      "id": "function-before-diverging-argument",
+      "source": "(program 1.0.0 [(error) [(lam x [x x]) (lam x [x x])]])\n",
+      "expected": {
+        "status": "failure",
+        "kind": "evaluation"
+      },
+      "derivation": "Evaluate function before argument: Error must terminate before entering the diverging argument. Reversing evaluation order exhausts the finite budget instead."
+    },
+    {
+      "id": "force-constant",
+      "source": "(program 1.0.0 (force (con integer 42)))\n",
+      "expected": {
+        "status": "failure",
+        "kind": "evaluation"
+      },
+      "derivation": "Only delayed values can be forced in this subset; forcing a primitive constant is an evaluation failure."
+    },
+    {
+      "id": "apply-delay",
+      "source": "(program 1.0.0 [(delay (lam x x)) (con integer 1)])\n",
+      "expected": {
+        "status": "failure",
+        "kind": "evaluation"
+      },
+      "derivation": "A delay is not a function; application evaluates both operands and then fails without implicitly forcing."
+    }
+  ],
+  "budget_boundaries": [
+    "plutus/builtin/constant/integer/integer-01/integer-01.uplc",
+    "plutus/term/app/app-9/app-9.uplc",
+    "probe/force-captured-delay-after-shadow",
+    "probe/force-delay-constant"
+  ],
+  "decoder": [
+    {
+      "id": "empty",
+      "hex": "",
+      "expected": {
+        "status": "failure",
+        "kind": "decode"
+      },
+      "derivation": "Flat decoder blanket precondition: insufficient input fails before any version or term."
+    },
+    {
+      "id": "truncated-version",
+      "hex": "01",
+      "expected": {
+        "status": "failure",
+        "kind": "decode"
+      },
+      "derivation": "Flat program consists of three natural version components and a term; minor/patch are absent."
+    },
+    {
+      "id": "missing-term",
+      "hex": "010000",
+      "expected": {
+        "status": "failure",
+        "kind": "decode"
+      },
+      "derivation": "UPLC 1.0.0 header is complete but no four-bit term tag remains."
+    },
+    {
+      "id": "truncated-integer",
+      "hex": "0100004800",
+      "expected": {
+        "status": "failure",
+        "kind": "decode"
+      },
+      "derivation": "Constant tag 0100 and singleton integer type list begin normally; integer payload/final padding are truncated."
+    },
+    {
+      "id": "unterminated-integer",
+      "hex": "01000048202001",
+      "expected": {
+        "status": "failure",
+        "kind": "decode"
+      },
+      "derivation": "Integer payload consists of continuation chunks without a complete terminal chunk; bounded decoder must reject truncation."
+    },
+    {
+      "id": "missing-final-one",
+      "hex": "01000060",
+      "expected": {
+        "status": "failure",
+        "kind": "decode"
+      },
+      "derivation": "Error tag 0110 is followed by padding 0000, which lacks the required terminal one."
+    },
+    {
+      "id": "unaligned-final-one",
+      "hex": "01000068",
+      "expected": {
+        "status": "failure",
+        "kind": "decode"
+      },
+      "derivation": "Error tag 0110 followed by 1000 terminates filler before byte alignment; strict decoder must not ignore the remaining three bits."
+    },
+    {
+      "id": "trailing-zero-byte",
+      "hex": "0100006100",
+      "expected": {
+        "status": "failure",
+        "kind": "decode"
+      },
+      "derivation": "A complete Error encoding 01000061 has one extra zero byte; strict raw Flat consumption rejects trailing bytes."
+    },
+    {
+      "id": "trailing-program",
+      "hex": "0100006101000061",
+      "expected": {
+        "status": "failure",
+        "kind": "decode"
+      },
+      "derivation": "Two complete raw Flat programs concatenated; a request contains exactly one program."
+    },
+    {
+      "id": "unaligned-byte-filler",
+      "hex": "01000048840200ff0001",
+      "expected": {
+        "status": "failure",
+        "kind": "decode"
+      },
+      "derivation": "Bytestring type is followed by early filler one (000100), not boundary-aligned 000001."
+    },
+    {
+      "id": "truncated-byte-chunk",
+      "hex": "01000048810200",
+      "expected": {
+        "status": "failure",
+        "kind": "decode"
+      },
+      "derivation": "Bytestring chunk declares length 2 but supplies only one byte."
+    },
+    {
+      "id": "missing-byte-terminator",
+      "hex": "01000048810200ff",
+      "expected": {
+        "status": "failure",
+        "kind": "decode"
+      },
+      "derivation": "A two-byte chunk is complete but zero-length chunk terminator and program filler are absent."
+    },
+    {
+      "id": "invalid-utf8",
+      "hex": "010000490101ff0001",
+      "expected": {
+        "status": "failure",
+        "kind": "decode"
+      },
+      "derivation": "String chunks contain byte ff, which is not a valid UTF-8 encoding."
+    },
+    {
+      "id": "unknown-term-tag",
+      "hex": "010000a1",
+      "expected": {
+        "status": "failure",
+        "kind": "decode"
+      },
+      "derivation": "Term tag 1010 is absent from the UPLC constructor table (0..9)."
+    },
+    {
+      "id": "unknown-major-version",
+      "hex": "020000480001",
+      "expected": {
+        "status": "failure",
+        "kind": "decode"
+      },
+      "derivation": "V3/PV11 availableVersions are 1.0.0 and 1.1.0; 2.0.0 is unavailable even though raw oracle APIs accept it."
+    },
+    {
+      "id": "unknown-minor-version",
+      "hex": "010200480001",
+      "expected": {
+        "status": "failure",
+        "kind": "decode"
+      },
+      "derivation": "V3/PV11 version map does not include UPLC 1.2.0."
+    },
+    {
+      "id": "zero-debruijn",
+      "hex": "0100000001",
+      "expected": {
+        "status": "failure",
+        "kind": "decode"
+      },
+      "derivation": "Flat spec Variable names decoder Dname requires n>0. Zero is rejected here although raw reference APIs decode then report evaluation failure."
+    },
+    {
+      "id": "unbound-debruijn-one",
+      "hex": "0100000011",
+      "expected": {
+        "status": "failure",
+        "kind": "evaluation"
+      },
+      "derivation": "De Bruijn index 1 is valid Flat. In an empty environment lookup fails evaluation; pinned Aiken instead panics on subtraction overflow."
+    }
+  ],
+  "unsupported": [
+    {
+      "id": "builtin",
+      "source": "(program 1.0.0 (builtin addInteger))\n",
+      "derivation": "Valid builtin values are outside this milestone."
+    },
+    {
+      "id": "constr",
+      "source": "(program 1.1.0 (constr 0))\n",
+      "derivation": "Valid UPLC 1.1 constructor evaluation is deferred."
+    },
+    {
+      "id": "case",
+      "source": "(program 1.1.0 (case (constr 0) (con integer 7)))\n",
+      "derivation": "Valid case evaluation is deferred."
+    },
+    {
+      "id": "list",
+      "source": "(program 1.0.0 (con (list integer) [1,2]))\n",
+      "derivation": "Complex list constants are deferred."
+    },
+    {
+      "id": "pair",
+      "source": "(program 1.0.0 (con (pair integer bool) (1,True)))\n",
+      "derivation": "Complex pair constants are deferred."
+    },
+    {
+      "id": "data",
+      "source": "(program 1.0.0 (con data (I 1)))\n",
+      "derivation": "Data constants and their structural normalization are deferred."
+    },
+    {
+      "id": "counting",
+      "source": "(program 1.0.0 (con unit ()))\n",
+      "mode": {
+        "kind": "counting"
+      },
+      "derivation": "Genuine counting mode is deferred. No permissive restricting budget is substituted."
+    }
+  ],
+  "audit": [
+    {
+      "id": "force-error-startup-only",
+      "source": "(program 1.0.0 (force (error)))\n",
+      "mode": {
+        "kind": "restricting",
+        "budget": {
+          "cpu": "100",
+          "mem": "100"
+        }
+      },
+      "derivation": "Immediate per-event charging exhausts on Force; the reference machines can fail Error before flushing buffered Force charges. Do not suppress this failure-kind difference or compare it as a pass."
+    },
+    {
+      "id": "zero-debruijn-reference-policy",
+      "hex": "0100000001",
+      "expected": {
+        "status": "failure",
+        "kind": "decode"
+      },
+      "derivation": "Flat spec Variable names decoder Dname requires n>0. Zero is rejected here although raw reference APIs decode then report evaluation failure."
+    },
+    {
+      "id": "unbound-debruijn-reference-panic",
+      "hex": "0100000011",
+      "expected": {
+        "status": "failure",
+        "kind": "evaluation"
+      },
+      "derivation": "De Bruijn index 1 is valid Flat. In an empty environment lookup fails evaluation; pinned Aiken instead panics on subtraction overflow."
+    }
+  ]
+}

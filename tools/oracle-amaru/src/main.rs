@@ -14,6 +14,32 @@ use uplc_conformance::{Budget, FailureKind, Language, Mode, Outcome, Program as 
 
 const REVISION: &str = "34a453005bcaaf837ee73bd996b99eab8ef92961";
 
+/// Encode a parsed source without evaluating it. The bytes constant is a
+/// transport envelope for the fixture builder, not an evaluation result.
+fn encode_flat(request: &Request) -> Outcome {
+    if !matches!(request.profile.language, Language::PlutusV3)
+        || request.profile.protocol_major != 11
+    {
+        return Outcome::unsupported("initial encoder profile: PlutusV3 / protocol 11");
+    }
+    let Input::UplcText { source } = &request.program else {
+        return Outcome::unsupported("--encode-flat requires textual UPLC input");
+    };
+    let arena = Arena::new();
+    let program = match parse_program(&arena, source, ProtocolVersion::new(11, 0)).into_result() {
+        Ok(program) => program,
+        Err(error) => return Outcome::failure(FailureKind::Decode, format!("{error:?}")),
+    };
+    match flat::encode(program) {
+        Ok(bytes) => Outcome::Success {
+            term: json!(["constant", ["bytes", hex::encode(bytes)]]),
+            budget: Budget::new(0, 0),
+            traces: vec![],
+        },
+        Err(error) => Outcome::failure(FailureKind::Decode, error.to_string()),
+    }
+}
+
 fn evaluate(request: &Request, normalize_only: bool) -> Outcome {
     let Mode::Restricting { budget } = &request.mode else {
         return Outcome::unsupported(
@@ -153,7 +179,11 @@ fn type_name(typ: &Type<'_>, depth: usize) -> Result<Value, String> {
 }
 
 fn main() -> std::io::Result<()> {
-    let normalize_only = std::env::args().nth(1).as_deref() == Some("--normalize");
+    let mode = std::env::args().nth(1);
+    if mode.as_deref() == Some("--encode-flat") {
+        return uplc_conformance::serve("amaru-flat-encoder", REVISION, encode_flat);
+    }
+    let normalize_only = mode.as_deref() == Some("--normalize");
     uplc_conformance::serve(
         if normalize_only {
             "amaru-normalizer"

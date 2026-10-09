@@ -16,7 +16,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: make check test milestone-check report
+      - run: make check test milestone-check builtin-check report
       - run: cargo check --manifest-path fuzz/Cargo.toml --locked
       - uses: actions/upload-artifact@v4
         if: always()

@@ -9,6 +9,10 @@ use uplc_core::evaluate;
 const MILESTONE: &str = include_str!("../../../fixtures/milestone.jsonl");
 const DECODER: &str = include_str!("../../../fixtures/milestone-decoder.jsonl");
 const UNSUPPORTED: &str = include_str!("../../../fixtures/milestone-unsupported.jsonl");
+const BUILTINS: &str = include_str!("../../../fixtures/builtins.jsonl");
+const BUILTIN_POLICY: &str = include_str!("../../../fixtures/builtins-candidate.jsonl");
+const BUILTIN_DECODER: &str = include_str!("../../../fixtures/builtins-decoder.jsonl");
+const BUILTIN_UNSUPPORTED: &str = include_str!("../../../fixtures/builtins-unsupported.jsonl");
 
 fn cases(corpus: &str) -> impl Iterator<Item = Value> + '_ {
     corpus
@@ -17,8 +21,23 @@ fn cases(corpus: &str) -> impl Iterator<Item = Value> + '_ {
 }
 
 fn request(case: &Value) -> Request {
-    let mut profile: Value =
-        serde_json::from_str(include_str!("../../../profiles/plutus-v3-pv11.json")).unwrap();
+    let encoded_profile = match case["profile"].as_str().unwrap() {
+        "profiles/plutus-v3-pv11.json" => include_str!("../../../profiles/plutus-v3-pv11.json"),
+        "fixtures/builtins/profiles/distinct.json" => {
+            include_str!("../../../fixtures/builtins/profiles/distinct.json")
+        }
+        "fixtures/builtins/profiles/negative-coefficients.json" => {
+            include_str!("../../../fixtures/builtins/profiles/negative-coefficients.json")
+        }
+        "fixtures/builtins/profiles/overflow.json" => {
+            include_str!("../../../fixtures/builtins/profiles/overflow.json")
+        }
+        "fixtures/builtins/profiles/zero.json" => {
+            include_str!("../../../fixtures/builtins/profiles/zero.json")
+        }
+        path => panic!("unregistered fixture profile {path}"),
+    };
+    let mut profile: Value = serde_json::from_str(encoded_profile).unwrap();
     profile.as_object_mut().unwrap().retain(|key, _| {
         matches!(
             key.as_str(),
@@ -54,8 +73,17 @@ fn wire(request: &Request) -> Value {
 
 #[test]
 fn wire_matches_all_independent_semantic_cost_and_decoder_goldens() {
-    let mut counts = [0, 0];
-    for (index, corpus) in [MILESTONE, DECODER].into_iter().enumerate() {
+    let mut counts = [0; 5];
+    for (index, corpus) in [
+        MILESTONE,
+        DECODER,
+        BUILTINS,
+        BUILTIN_POLICY,
+        BUILTIN_DECODER,
+    ]
+    .into_iter()
+    .enumerate()
+    {
         for case in cases(corpus) {
             let actual = wire(&request(&case));
             for (key, expected) in case["expected"].as_object().unwrap() {
@@ -68,7 +96,7 @@ fn wire_matches_all_independent_semantic_cost_and_decoder_goldens() {
             counts[index] += 1;
         }
     }
-    assert_eq!(counts, [68, 18]);
+    assert_eq!(counts, [68, 18, 162, 24, 8]);
 }
 
 #[test]
@@ -92,6 +120,15 @@ fn future_features_are_unsupported_even_when_hidden_inside_values() {
         count += 1;
     }
     assert_eq!(count, 6);
+    assert_eq!(cases(BUILTIN_UNSUPPORTED).count(), 14);
+    for case in cases(BUILTIN_UNSUPPORTED) {
+        assert_eq!(
+            wire(&request(&case))["status"],
+            "unsupported",
+            "{}",
+            case["id"]
+        );
+    }
     // lambda (builtin divideInteger): deferred builtins remain unsupported.
     let mut request = constant_request();
     request.program = uplc_conformance::Program::Flat {
@@ -213,6 +250,74 @@ fn raw_flat(term_bits: &str) -> String {
             .map(|chunk| u8::from_str_radix(std::str::from_utf8(chunk).unwrap(), 2).unwrap()),
     );
     hex::encode(bytes)
+}
+
+#[test]
+fn signed_builtin_models_and_wide_charges_keep_the_wire_policy() {
+    // Independently encode addInteger (2^64) 1: two Flat applications, the
+    // seven-bit builtin tag, integer type lists, and base-128 zigzag payloads.
+    fn integer_bits(value: u128) -> String {
+        let mut value = value * 2;
+        let mut bits = String::from("0100100000");
+        loop {
+            let byte = (value & 127) as u8;
+            value >>= 7;
+            bits.push_str(&format!("{:08b}", byte | if value == 0 { 0 } else { 128 }));
+            if value == 0 {
+                return bits;
+            }
+        }
+    }
+    let mut request = constant_request();
+    request.program = uplc_conformance::Program::Flat {
+        hex: raw_flat(
+            &(String::from("0011001101110000000") + &integer_bits(1_u128 << 64) + &integer_bits(1)),
+        ),
+    };
+    request.profile.cost_model.parameters.fill("0".into());
+    request.mode = Mode::Restricting {
+        budget: Budget::new(i64::MAX, i64::MAX),
+    };
+    let base = request.clone();
+    // max(2,1)=2 words; signed CPU and memory coefficients cancel exactly.
+    for (index, value) in [(0, i64::MIN), (1, i64::MAX), (2, 4), (3, -2)] {
+        request.profile.cost_model.parameters[index] = value.to_string();
+    }
+    rehash(&mut request);
+    let actual = wire(&request);
+    assert_eq!(actual["status"], "success");
+    assert_eq!(
+        actual["term"],
+        json!(["constant", ["integer", "18446744073709551617"]])
+    );
+    assert_eq!(
+        actual["budget"],
+        json!({"cpu": "9223372036854775806", "mem": "0"})
+    );
+    for index in [1, 3] {
+        request = base.clone();
+        request.profile.cost_model.parameters[index] = i64::MAX.to_string();
+        rehash(&mut request);
+        let actual = wire(&request);
+        assert_eq!(actual["kind"], "budget_exhausted");
+        assert!(actual["budget"].is_null());
+    }
+    for index in [0, 2] {
+        request = base.clone();
+        request.profile.cost_model.parameters[index] = "-1".into();
+        rehash(&mut request);
+        let actual = wire(&request);
+        assert_eq!(actual["status"], "unsupported");
+        assert!(actual["reason"].as_str().unwrap().contains("negative"));
+    }
+    request = base;
+    request.mode = Mode::Restricting {
+        budget: Budget::new(0, 0),
+    };
+    rehash(&mut request);
+    let actual = wire(&request);
+    assert_eq!(actual["status"], "success");
+    assert_eq!(actual["budget"], json!({"cpu": "0", "mem": "0"}));
 }
 
 #[test]

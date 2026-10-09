@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use crate::builtin::{ArgumentType, Builtin};
+
 /// Raw decoding never treats an implementation resource limit as a bad program.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodeError {
@@ -24,9 +26,26 @@ impl std::error::Error for DecodeError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeError {
     ExplicitError,
-    OpenTerm { index: u64, environment_size: usize },
+    OpenTerm {
+        index: u64,
+        environment_size: usize,
+    },
     NonFunctionApplication,
     NonDelayForce,
+    BuiltinArity {
+        builtin: Builtin,
+        expected: usize,
+        actual: usize,
+    },
+    BuiltinTypeMismatch {
+        builtin: Builtin,
+        argument: usize,
+        expected: ArgumentType,
+    },
+    BuiltinIntegerOutOfBounds {
+        builtin: Builtin,
+        argument: usize,
+    },
     Unsupported(String),
 }
 
@@ -43,6 +62,28 @@ impl fmt::Display for RuntimeError {
             ),
             Self::NonFunctionApplication => formatter.write_str("application of a non-function"),
             Self::NonDelayForce => formatter.write_str("force of a non-delay"),
+            Self::BuiltinArity {
+                builtin,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "{builtin} expects {expected} arguments, got {actual}"
+            ),
+            Self::BuiltinTypeMismatch {
+                builtin,
+                argument,
+                expected,
+            } => write!(
+                formatter,
+                "{builtin} argument {} must be {expected}",
+                argument + 1
+            ),
+            Self::BuiltinIntegerOutOfBounds { builtin, argument } => write!(
+                formatter,
+                "{builtin} argument {} is outside the profile's signed integer range",
+                argument + 1
+            ),
             Self::Unsupported(reason) => write!(formatter, "unsupported evaluation: {reason}"),
         }
     }

@@ -84,12 +84,19 @@ fn future_features_are_unsupported_even_when_hidden_inside_values() {
         count += 1;
     }
     assert_eq!(count, 7);
-    // lambda (builtin addInteger): an unevaluated body is still unsupported.
+    // lambda (builtin divideInteger): deferred builtins remain unsupported.
     let mut request = constant_request();
+    request.program = uplc_conformance::Program::Flat {
+        hex: raw_flat("001001110000011"),
+    };
+    assert_eq!(wire(&request)["status"], "unsupported");
+    // Supported builtin syntax is discharged without evaluating the body.
     request.program = uplc_conformance::Program::Flat {
         hex: raw_flat("001001110000000"),
     };
-    assert_eq!(wire(&request)["status"], "unsupported");
+    let outcome = wire(&request);
+    assert_eq!(outcome["status"], "success");
+    assert_eq!(outcome["term"], json!(["lambda", ["builtin", "0"]]));
 }
 
 #[test]

@@ -46,6 +46,9 @@ pub enum RuntimeError {
         builtin: Builtin,
         argument: usize,
     },
+    BuiltinDivisionByZero {
+        builtin: Builtin,
+    },
     Unsupported(String),
 }
 
@@ -84,6 +87,9 @@ impl fmt::Display for RuntimeError {
                 "{builtin} argument {} is outside the profile's signed integer range",
                 argument + 1
             ),
+            Self::BuiltinDivisionByZero { builtin } => {
+                write!(formatter, "{builtin}: division by zero")
+            }
             Self::Unsupported(reason) => write!(formatter, "unsupported evaluation: {reason}"),
         }
     }

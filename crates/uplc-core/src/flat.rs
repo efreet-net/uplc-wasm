@@ -708,7 +708,7 @@ mod tests {
 
     #[test]
     fn unimplemented_builtins_are_unsupported_even_under_lambda_and_delay() {
-        for tag in [3, 54, 87, 100] {
+        for tag in [10, 54, 87, 100] {
             for prefix in [None, Some(1), Some(2)] {
                 let mut bits = Bits::program();
                 if let Some(prefix) = prefix {
@@ -730,7 +730,7 @@ mod tests {
 
     #[test]
     fn supported_builtins_are_structural_syntax_with_strict_complete_encodings() {
-        for tag in [0, 1, 2, 7, 8, 9, 26] {
+        for tag in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 26] {
             for prefix in [None, Some(1), Some(2), Some(5)] {
                 let mut bits = Bits::program();
                 if let Some(prefix) = prefix {

@@ -14,6 +14,12 @@ const UNLIMITED: ExecutionBudget = ExecutionBudget {
     mem: i64::MAX,
 };
 const ZERO: ExecutionBudget = ExecutionBudget { cpu: 0, mem: 0 };
+const DIVISION: [Builtin; 4] = [
+    Builtin::DivideInteger,
+    Builtin::QuotientInteger,
+    Builtin::RemainderInteger,
+    Builtin::ModInteger,
+];
 
 #[derive(Default)]
 struct Ast(Vec<Term>);
@@ -1047,4 +1053,567 @@ fn generated_constant_payload_is_cumulatively_bounded_even_with_zero_costs() {
             .result
             .is_ok()
     );
+}
+
+#[test]
+fn division_success_and_exact_or_one_short_budgets_use_independent_costs() {
+    // Polynomial(1,1)=123203+1716+7305+57+960-900=132341;
+    // all four memories are one. Startup plus five CEK events adds 80100/600.
+    let exact = ExecutionBudget {
+        cpu: 212_441,
+        mem: 601,
+    };
+    for (builtin, expected) in DIVISION.into_iter().zip([-3, -2, -1, 2]) {
+        let program = binary(builtin, -7, 3);
+        let success = evaluate(&program, &model(), exact);
+        assert_eq!(success.consumed, Some(exact));
+        assert_eq!(term(success), constant(expected));
+        for limit in [
+            ExecutionBudget {
+                cpu: exact.cpu - 1,
+                ..exact
+            },
+            ExecutionBudget {
+                mem: exact.mem - 1,
+                ..exact
+            },
+        ] {
+            let result = evaluate(&program, &model(), limit);
+            assert_eq!(
+                result.result,
+                Err(MachineError::Budget(BudgetError::Exhausted))
+            );
+            assert_eq!(result.consumed, Some(exact));
+        }
+        assert_eq!(
+            term(evaluate(&program, &custom(&[]), ZERO)),
+            constant(expected)
+        );
+    }
+}
+
+#[test]
+fn division_zero_failures_charge_application_without_flushing_pending_steps() {
+    let attempted = ExecutionBudget {
+        cpu: 132_441,
+        mem: 101,
+    };
+    for builtin in DIVISION {
+        for numerator in [-1, 0, 1] {
+            let program = binary(builtin, numerator, 0);
+            let result = evaluate(&program, &model(), attempted);
+            assert_eq!(
+                result.result,
+                Err(MachineError::Runtime(RuntimeError::BuiltinDivisionByZero {
+                    builtin
+                }))
+            );
+            assert_eq!(result.consumed, Some(attempted));
+            for limit in [
+                ExecutionBudget {
+                    cpu: attempted.cpu - 1,
+                    ..attempted
+                },
+                ExecutionBudget {
+                    mem: attempted.mem - 1,
+                    ..attempted
+                },
+            ] {
+                let result = evaluate(&program, &model(), limit);
+                assert_eq!(
+                    result.result,
+                    Err(MachineError::Budget(BudgetError::Exhausted))
+                );
+                assert_eq!(result.consumed, Some(attempted));
+            }
+            let result = evaluate(&program, &model(), ZERO);
+            assert_eq!(
+                result.result,
+                Err(MachineError::Budget(BudgetError::Exhausted))
+            );
+            assert_eq!(
+                result.consumed,
+                Some(ExecutionBudget { cpu: 100, mem: 100 })
+            );
+            let result = evaluate(&program, &custom(&[]), ZERO);
+            assert_eq!(
+                result.result,
+                Err(MachineError::Runtime(RuntimeError::BuiltinDivisionByZero {
+                    builtin
+                }))
+            );
+            assert_eq!(result.consumed, Some(ZERO));
+        }
+    }
+}
+
+#[test]
+fn division_zero_failure_crosses_the_two_hundred_event_flush_exactly() {
+    for builtin in DIVISION {
+        for (wrappers, extra_force, charged_events) in
+            [(97, false, 0), (97, true, 200), (98, false, 200)]
+        {
+            let mut ast = Ast::default();
+            let one = ast.integer(1);
+            let zero = ast.integer(0);
+            let call = ast.call(builtin, &[one, zero]);
+            let mut root = ast.wrap(call, wrappers);
+            if extra_force {
+                root = ast.term(Term::Force(root));
+            }
+            let program = ast.program(root);
+            let result = run(&program);
+            assert_eq!(
+                result.result,
+                Err(MachineError::Runtime(RuntimeError::BuiltinDivisionByZero {
+                    builtin
+                }))
+            );
+            assert_eq!(
+                result.consumed,
+                Some(ExecutionBudget {
+                    cpu: 132_441 + 16_000 * charged_events,
+                    mem: 101 + 100 * charged_events,
+                })
+            );
+            // At 200 events, constant is the first category in the batch and
+            // exhausts before the denotation or builtin application charge.
+            // With 97 wrappers plus the extra force, both constants are in the
+            // batch; 98 wrappers put only the first constant in that batch.
+            let result = evaluate(&program, &model(), ExecutionBudget { cpu: 100, mem: 100 });
+            assert_eq!(
+                result.result,
+                Err(MachineError::Budget(BudgetError::Exhausted))
+            );
+            assert_eq!(
+                result.consumed,
+                Some(if charged_events == 0 {
+                    ExecutionBudget {
+                        cpu: 132_441,
+                        mem: 101,
+                    }
+                } else if extra_force {
+                    ExecutionBudget {
+                        cpu: 32_100,
+                        mem: 300,
+                    }
+                } else {
+                    ExecutionBudget {
+                        cpu: 16_100,
+                        mem: 200,
+                    }
+                })
+            );
+        }
+    }
+}
+
+#[test]
+fn division_unlifting_precedes_charging_but_evaluates_both_arguments_first() {
+    let outside = BigInt::from(1) << CARDANO_INTEGER_MAXIMUM_BITS;
+    for builtin in DIVISION {
+        for bad_argument in [0, 1] {
+            for bad_type in [false, true] {
+                let mut ast = Ast::default();
+                let bad = if bad_type {
+                    ast.constant(Constant::Bool(true))
+                } else {
+                    ast.integer(outside.clone())
+                };
+                let zero = ast.integer(0);
+                let arguments = if bad_argument == 0 {
+                    [bad, zero]
+                } else {
+                    [zero, bad]
+                };
+                let root = ast.call(builtin, &arguments);
+                let result = run(&ast.program(root));
+                let error = if bad_type {
+                    RuntimeError::BuiltinTypeMismatch {
+                        builtin,
+                        argument: bad_argument,
+                        expected: ArgumentType::Integer,
+                    }
+                } else {
+                    RuntimeError::BuiltinIntegerOutOfBounds {
+                        builtin,
+                        argument: bad_argument,
+                    }
+                };
+                assert_eq!(result.result, Err(MachineError::Runtime(error)));
+                assert_eq!(
+                    result.consumed,
+                    Some(ExecutionBudget { cpu: 100, mem: 100 })
+                );
+            }
+        }
+        // Unlifting is deferred until the second argument has become a value.
+        let mut ast = Ast::default();
+        let wrong_type = ast.constant(Constant::Bool(true));
+        let error = ast.term(Term::Error);
+        let root = ast.call(builtin, &[wrong_type, error]);
+        let result = run(&ast.program(root));
+        assert_eq!(
+            result.result,
+            Err(MachineError::Runtime(RuntimeError::ExplicitError))
+        );
+        assert_eq!(
+            result.consumed,
+            Some(ExecutionBudget { cpu: 100, mem: 100 })
+        );
+    }
+}
+
+#[test]
+fn division_partial_invalid_arguments_and_excess_forces_remain_structural() {
+    let outside: BigInt = BigInt::from(1) << CARDANO_INTEGER_MAXIMUM_BITS;
+    for builtin in DIVISION {
+        for invalid in [Constant::Bool(true), Constant::Integer(outside.clone())] {
+            let mut ast = Ast::default();
+            let value = ast.constant(invalid.clone());
+            let partial = ast.call(builtin, &[value]);
+            let program = Program::new([1, 1, 0], ast.0.clone(), partial).unwrap();
+            let expected_argument = match &invalid {
+                Constant::Bool(value) => json!(["constant", ["bool", value]]),
+                Constant::Integer(value) => json!(["constant", ["integer", value.to_string()]]),
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                term(run(&program)),
+                json!([
+                    "apply",
+                    ["builtin", builtin.tag().to_string()],
+                    expected_argument
+                ])
+            );
+            // These monomorphic functions require no forces. A force on a
+            // partial value fails structurally without attempting unlifting.
+            let root = ast.term(Term::Force(partial));
+            let result = run(&ast.program(root));
+            assert_eq!(
+                result.result,
+                Err(MachineError::Runtime(RuntimeError::NonDelayForce))
+            );
+            assert_eq!(
+                result.consumed,
+                Some(ExecutionBudget { cpu: 100, mem: 100 })
+            );
+        }
+        let mut ast = Ast::default();
+        let bare = ast.term(Term::Builtin(builtin));
+        let forced = ast.term(Term::Force(bare));
+        let result = run(&ast.program(forced));
+        assert_eq!(
+            result.result,
+            Err(MachineError::Runtime(RuntimeError::NonDelayForce))
+        );
+        assert_eq!(
+            result.consumed,
+            Some(ExecutionBudget { cpu: 100, mem: 100 })
+        );
+    }
+}
+
+#[test]
+fn division_captured_lambda_and_delay_discharge_without_running_their_bodies() {
+    for (builtin, expected) in DIVISION.into_iter().zip([-3, -2, -1, 2]) {
+        // Capture numerator x inside lambda y. f x y, then apply y=3.
+        let mut ast = Ast::default();
+        let x = ast.term(Term::Var(2));
+        let y = ast.term(Term::Var(1));
+        let body = ast.call(builtin, &[x, y]);
+        let lambda = ast.term(Term::Lambda(body));
+        let capture = ast.term(Term::Lambda(lambda));
+        let numerator = ast.integer(-7);
+        let closure = ast.apply(capture, numerator);
+        let returned = Program::new([1, 1, 0], ast.0.clone(), closure).unwrap();
+        assert_eq!(
+            term(run(&returned)),
+            json!([
+                "lambda",
+                [
+                    "apply",
+                    [
+                        "apply",
+                        ["builtin", builtin.tag().to_string()],
+                        constant(-7)
+                    ],
+                    ["var", "1"]
+                ]
+            ])
+        );
+        let denominator = ast.integer(3);
+        let root = ast.apply(closure, denominator);
+        assert_eq!(term(run(&ast.program(root))), constant(expected));
+
+        // A captured zero divisor in a returned delay is syntax until forced.
+        let mut ast = Ast::default();
+        let x = ast.term(Term::Var(1));
+        let zero = ast.integer(0);
+        let body = ast.call(builtin, &[x, zero]);
+        let delay = ast.term(Term::Delay(body));
+        let capture = ast.term(Term::Lambda(delay));
+        let numerator = ast.integer(-7);
+        let delayed = ast.apply(capture, numerator);
+        let returned = Program::new([1, 1, 0], ast.0.clone(), delayed).unwrap();
+        let result = run(&returned);
+        assert_eq!(
+            result.consumed,
+            Some(ExecutionBudget {
+                cpu: 64_100,
+                mem: 500
+            })
+        );
+        assert_eq!(
+            term(result),
+            json!([
+                "delay",
+                [
+                    "apply",
+                    [
+                        "apply",
+                        ["builtin", builtin.tag().to_string()],
+                        constant(-7)
+                    ],
+                    constant(0)
+                ]
+            ])
+        );
+        let root = ast.term(Term::Force(delayed));
+        let result = run(&ast.program(root));
+        assert_eq!(
+            result.result,
+            Err(MachineError::Runtime(RuntimeError::BuiltinDivisionByZero {
+                builtin
+            }))
+        );
+        assert_eq!(
+            result.consumed,
+            Some(ExecutionBudget {
+                cpu: 132_441,
+                mem: 101
+            })
+        );
+    }
+}
+
+#[test]
+fn division_partials_survive_if_then_else_and_repeated_capture_use() {
+    for (builtin, expected, repeated) in DIVISION
+        .into_iter()
+        .zip([-3, -2, -1, 2])
+        .zip([-1, 0, -2, 1])
+        .map(|((b, e), r)| (b, e, r))
+    {
+        let mut ast = Ast::default();
+        let numerator = ast.integer(-7);
+        let invalid = ast.constant(Constant::Bool(true));
+        let valid = ast.call(builtin, &[numerator]);
+        let wrong_type = ast.call(builtin, &[invalid]);
+        let condition = ast.constant(Constant::Bool(true));
+        let selected = ast.call(Builtin::IfThenElse, &[condition, valid, wrong_type]);
+        let denominator = ast.integer(3);
+        let root = ast.apply(selected, denominator);
+        assert_eq!(term(run(&ast.program(root))), constant(expected));
+        // (lambda f. add (f 3) (f -3)) (builtin -7), with shared partial f.
+        let mut ast = Ast::default();
+        let f = ast.term(Term::Var(1));
+        let three = ast.integer(3);
+        let negative_three = ast.integer(-3);
+        let left = ast.apply(f, three);
+        let right = ast.apply(f, negative_three);
+        let sum = ast.call(Builtin::AddInteger, &[left, right]);
+        let lambda = ast.term(Term::Lambda(sum));
+        let numerator = ast.integer(-7);
+        let partial = ast.call(builtin, &[numerator]);
+        let root = ast.apply(lambda, partial);
+        assert_eq!(term(run(&ast.program(root))), constant(repeated));
+    }
+}
+
+#[test]
+fn division_overapplication_and_failed_function_preserve_call_by_value_order() {
+    for builtin in DIVISION {
+        for (zero_divisor, error_argument) in [(false, false), (false, true), (true, true)] {
+            let mut ast = Ast::default();
+            let numerator = ast.integer(7);
+            let denominator = ast.integer(if zero_divisor { 0 } else { 3 });
+            let saturated = ast.call(builtin, &[numerator, denominator]);
+            let argument = if error_argument {
+                ast.term(Term::Error)
+            } else {
+                numerator
+            };
+            let root = ast.apply(saturated, argument);
+            let result = run(&ast.program(root));
+            let error = if zero_divisor {
+                RuntimeError::BuiltinDivisionByZero { builtin }
+            } else if error_argument {
+                RuntimeError::ExplicitError
+            } else {
+                RuntimeError::NonFunctionApplication
+            };
+            assert_eq!(result.result, Err(MachineError::Runtime(error)));
+            assert_eq!(
+                result.consumed,
+                Some(ExecutionBudget {
+                    cpu: 132_441,
+                    mem: 101
+                })
+            );
+        }
+    }
+}
+
+#[test]
+fn division_profile_minimum_divided_by_minus_one_is_a_permitted_result() {
+    let boundary: BigInt = BigInt::from(1) << CARDANO_INTEGER_MAXIMUM_BITS;
+    for builtin in DIVISION {
+        let result = run(&binary(builtin, -&boundary, -1));
+        let expected = if matches!(builtin, Builtin::DivideInteger | Builtin::QuotientInteger) {
+            boundary.clone()
+        } else {
+            0.into()
+        };
+        assert_eq!(
+            result.consumed,
+            Some(ExecutionBudget {
+                cpu: 967_471_916,
+                mem: if matches!(builtin, Builtin::DivideInteger | Builtin::QuotientInteger) {
+                    4695
+                } else {
+                    601
+                },
+            })
+        );
+        assert_eq!(
+            term(result),
+            json!(["constant", ["integer", expected.to_string()]])
+        );
+    }
+}
+
+#[test]
+fn division_charge_overflow_or_negative_models_precede_zero_failure() {
+    for (builtin, index) in DIVISION.into_iter().zip([49, 130, 141, 114]) {
+        let program = binary(builtin, 1, 0);
+        for updates in [
+            vec![(29, 1), (index + 1, i64::MAX)],
+            vec![(30, 1), (index + 8, i64::MAX)],
+        ] {
+            let result = evaluate(&program, &custom(&updates), UNLIMITED);
+            assert_eq!(
+                result.result,
+                Err(MachineError::Budget(BudgetError::Overflow))
+            );
+            assert_eq!(result.consumed, None);
+        }
+        for updates in [
+            vec![(index + 1, -1), (index + 7, -1)],
+            vec![(index + 8, -1)],
+        ] {
+            let result = evaluate(&program, &custom(&updates), UNLIMITED);
+            is_unsupported(&result, "negative");
+            assert_eq!(result.consumed, Some(ZERO));
+        }
+    }
+}
+
+#[test]
+fn division_work_limits_follow_charging_and_precede_denotation_even_at_zero_cost() {
+    let large: BigInt = BigInt::from(1) << 202_368;
+    for builtin in DIVISION {
+        // 3163^2+3163=10007732 portable units exceed 10M without executing.
+        let program = binary(builtin, large.clone(), large.clone());
+        let result = evaluate(&program, &custom(&[]), ZERO);
+        is_unsupported(&result, "work bound");
+        assert_eq!(result.consumed, Some(ZERO));
+        let result = evaluate(&program, &model(), ExecutionBudget { cpu: 100, mem: 100 });
+        assert_eq!(
+            result.result,
+            Err(MachineError::Budget(BudgetError::Exhausted))
+        );
+        assert_eq!(
+            result.consumed,
+            Some(ExecutionBudget {
+                cpu: 1_199_191_299,
+                mem: if matches!(builtin, Builtin::DivideInteger | Builtin::QuotientInteger) {
+                    101
+                } else {
+                    3263
+                },
+            })
+        );
+        // Nine CEK transitions precede the two units for this division. A
+        // resource failure happens before the zero-divisor denotation.
+        let program = binary(builtin, 1, 0);
+        for (work, denotation) in [(10, false), (11, true)] {
+            let result = evaluate_with_limits(
+                &program,
+                &model(),
+                UNLIMITED,
+                ResourceLimits {
+                    work,
+                    ..ResourceLimits::default()
+                },
+            );
+            if denotation {
+                assert_eq!(
+                    result.result,
+                    Err(MachineError::Runtime(RuntimeError::BuiltinDivisionByZero {
+                        builtin
+                    }))
+                );
+            } else {
+                is_unsupported(&result, "work bound");
+            }
+            assert_eq!(
+                result.consumed,
+                Some(ExecutionBudget {
+                    cpu: 132_441,
+                    mem: 101
+                })
+            );
+        }
+    }
+}
+
+#[test]
+fn division_results_retain_runtime_payload_and_cumulative_work_limits() {
+    for builtin in [Builtin::DivideInteger, Builtin::QuotientInteger] {
+        let mut ast = Ast::default();
+        let one = ast.integer(1);
+        let value = ast.integer(255);
+        let mut root = value;
+        for _ in 0..3 {
+            root = ast.call(builtin, &[root, one]);
+        }
+        let result = evaluate_with_limits(
+            &ast.program(root),
+            &custom(&[]),
+            ZERO,
+            ResourceLimits {
+                constant_bytes: 2,
+                ..ResourceLimits::default()
+            },
+        );
+        is_unsupported(&result, "runtime constant payload");
+        let mut ast = Ast::default();
+        let one = ast.integer(1);
+        let value = ast.integer(BigInt::from(1) << 640);
+        let mut root = value;
+        for _ in 0..3 {
+            root = ast.call(builtin, &[root, one]);
+        }
+        let result = evaluate_with_limits(
+            &ast.program(root),
+            &custom(&[]),
+            ZERO,
+            ResourceLimits {
+                work: 64,
+                ..ResourceLimits::default()
+            },
+        );
+        is_unsupported(&result, "work bound");
+    }
 }

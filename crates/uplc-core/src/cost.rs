@@ -16,6 +16,8 @@
 
 use std::fmt;
 
+use num_bigint::{BigInt, Sign};
+
 use crate::builtin::Builtin;
 
 pub const PARAMETER_COUNT: usize = 350;
@@ -113,14 +115,93 @@ impl BuiltinCoefficients {
     fn evaluate(self, cpu_size: u128, mem_size: u128) -> Result<BuiltinBudget, BuiltinCostError> {
         let cpu = self.cpu.evaluate(cpu_size, Dimension::Cpu);
         let mem = self.mem.evaluate(mem_size, Dimension::Mem);
-        match (cpu, mem) {
-            // A negative dimension makes the computed model unsupported even
-            // when the other dimension is too large to charge.
-            (Err(error @ BuiltinCostError::NegativeComputedCharge { .. }), _)
-            | (_, Err(error @ BuiltinCostError::NegativeComputedCharge { .. })) => Err(error),
-            (Err(error), _) | (_, Err(error)) => Err(error),
-            (Ok(cpu), Ok(mem)) => Ok(BuiltinBudget { cpu, mem }),
-        }
+        builtin_budget(cpu, mem)
+    }
+}
+
+fn builtin_budget(
+    cpu: Result<i128, BuiltinCostError>,
+    mem: Result<i128, BuiltinCostError>,
+) -> Result<BuiltinBudget, BuiltinCostError> {
+    match (cpu, mem) {
+        // A negative dimension makes the computed model unsupported even
+        // when the other dimension is too large to charge.
+        (Err(error @ BuiltinCostError::NegativeComputedCharge { .. }), _)
+        | (_, Err(error @ BuiltinCostError::NegativeComputedCharge { .. })) => Err(error),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+        (Ok(cpu), Ok(mem)) => Ok(BuiltinBudget { cpu, mem }),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QuadraticCost {
+    c00: i64,
+    c01: i64,
+    c02: i64,
+    c10: i64,
+    c11: i64,
+    c20: i64,
+    minimum: i64,
+}
+
+impl QuadraticCost {
+    fn evaluate(self, x: u64, y: u64) -> Result<i128, BuiltinCostError> {
+        // At most 194 magnitude bits suffice even for artificial u64::MAX
+        // input sizes and i64 coefficients; real bounded integers are smaller.
+        // Exact bounded intermediates preserve cancellation of opposite signed
+        // terms that individually overflow i128. Apply the official minimum
+        // before checking the final signed charge and converting to the meter.
+        let x = BigInt::from(x);
+        let y = BigInt::from(y);
+        let polynomial = BigInt::from(self.c00)
+            + self.c10 * &x
+            + self.c01 * &y
+            + self.c20 * &x * &x
+            + self.c11 * &x * &y
+            + self.c02 * &y * &y;
+        exact_charge(polynomial.max(BigInt::from(self.minimum)), Dimension::Cpu)
+    }
+}
+
+fn exact_charge(charge: BigInt, dimension: Dimension) -> Result<i128, BuiltinCostError> {
+    if charge.sign() == Sign::Minus {
+        return Err(BuiltinCostError::NegativeComputedCharge { dimension });
+    }
+    i128::try_from(charge).map_err(|_| BuiltinCostError::Overflow)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DivisionCoefficients {
+    constant: i64,
+    polynomial: QuadraticCost,
+    memory: LinearCost,
+    memory_minimum: Option<i64>,
+}
+
+impl DivisionCoefficients {
+    fn evaluate(self, x: u64, y: u64, symmetric: bool) -> Result<BuiltinBudget, BuiltinCostError> {
+        let cpu = if symmetric {
+            // AboveAndBelowDiagonal ignores the supplied constant and sorts
+            // operand sizes; it does not select a constant branch.
+            self.polynomial.evaluate(x.max(y), x.min(y))
+        } else if x < y {
+            // ConstAboveDiagonal takes the constant only strictly above the
+            // diagonal. Equal sizes use the full polynomial and its minimum.
+            LinearCost::constant(self.constant).evaluate(0, Dimension::Cpu)
+        } else {
+            self.polynomial.evaluate(x, y)
+        };
+        let size = match self.memory_minimum {
+            Some(minimum) => (i128::from(x) - i128::from(y)).max(i128::from(minimum)),
+            None => i128::from(y),
+        };
+        // A signed minimum is applied to x-y before multiplication. In
+        // particular, valid custom negative minima and slopes are not clamped.
+        let mem = exact_charge(
+            BigInt::from(self.memory.intercept) + BigInt::from(self.memory.slope) * size,
+            Dimension::Mem,
+        );
+        builtin_budget(cpu, mem)
     }
 }
 
@@ -187,6 +268,10 @@ pub struct MachineCosts {
     add_integer: BuiltinCoefficients,
     subtract_integer: BuiltinCoefficients,
     multiply_integer: BuiltinCoefficients,
+    divide_integer: DivisionCoefficients,
+    quotient_integer: DivisionCoefficients,
+    remainder_integer: DivisionCoefficients,
+    mod_integer: DivisionCoefficients,
     equals_integer: BuiltinCoefficients,
     less_than_integer: BuiltinCoefficients,
     less_than_equals_integer: BuiltinCoefficients,
@@ -236,6 +321,23 @@ impl MachineCosts {
             cpu: linear(index),
             mem: LinearCost::constant(parameters[index + 2]),
         };
+        let division = |index: usize, subtracted_sizes: bool| DivisionCoefficients {
+            constant: parameters[index],
+            polynomial: QuadraticCost {
+                c00: parameters[index + 1],
+                c01: parameters[index + 2],
+                c02: parameters[index + 3],
+                c10: parameters[index + 4],
+                c11: parameters[index + 5],
+                c20: parameters[index + 6],
+                minimum: parameters[index + 7],
+            },
+            memory: LinearCost {
+                intercept: parameters[index + 8],
+                slope: parameters[index + if subtracted_sizes { 10 } else { 9 }],
+            },
+            memory_minimum: subtracted_sizes.then(|| parameters[index + 9]),
+        };
         Ok(Self {
             startup: pair(29),
             var: pair(31),
@@ -248,6 +350,10 @@ impl MachineCosts {
             add_integer: linear_pair(0),
             subtract_integer: linear_pair(167),
             multiply_integer: linear_pair(124),
+            divide_integer: division(49, true),
+            quotient_integer: division(130, true),
+            remainder_integer: division(141, false),
+            mod_integer: division(114, false),
             equals_integer: comparison(71),
             less_than_integer: comparison(99),
             less_than_equals_integer: comparison(96),
@@ -277,7 +383,9 @@ impl MachineCosts {
     /// `ifThenElse` ignores both sizes because both of its costs are constant.
     ///
     /// Formula shapes are from pinned Plutus `builtinCostModelE.json`, with
-    /// `CostingFun/Core.hs:627-659` defining added/multiplied/min/max sizes.
+    /// `CostingFun/Core.hs:627-659` defining added/multiplied/min/max sizes,
+    /// `:412-440` the quadratic polynomial and minimum, and `:706-722` the
+    /// division-family branch and operand-size ordering rules.
     /// Integer arguments have singleton memory streams, so every supported
     /// formula produces one atomic CPU/memory charge. Shape E applies to V3/PV11
     /// per `PlutusLedgerApi/Common/ProtocolVersions.hs:136-138`; coefficients
@@ -300,6 +408,10 @@ impl MachineCosts {
                 let sum = u128::from(x) + u128::from(y);
                 (self.multiply_integer, product, sum)
             }
+            Builtin::DivideInteger => return self.divide_integer.evaluate(x, y, true),
+            Builtin::QuotientInteger => return self.quotient_integer.evaluate(x, y, false),
+            Builtin::RemainderInteger => return self.remainder_integer.evaluate(x, y, false),
+            Builtin::ModInteger => return self.mod_integer.evaluate(x, y, true),
             Builtin::EqualsInteger => (self.equals_integer, minimum, 0),
             Builtin::LessThanInteger => (self.less_than_integer, minimum, 0),
             Builtin::LessThanEqualsInteger => (self.less_than_equals_integer, minimum, 0),
@@ -579,6 +691,10 @@ mod tests {
             (Builtin::AddInteger, 101_208, 2, 102_888, 6),
             (Builtin::SubtractInteger, 101_208, 2, 102_888, 6),
             (Builtin::MultiplyInteger, 90_953, 2, 95_624, 7),
+            (Builtin::DivideInteger, 132_341, 1, 153_818, 1),
+            (Builtin::QuotientInteger, 132_341, 1, 85_848, 1),
+            (Builtin::RemainderInteger, 132_341, 1, 85_848, 5),
+            (Builtin::ModInteger, 132_341, 1, 153_818, 5),
             (Builtin::EqualsInteger, 52_333, 1, 52_891, 1),
             (Builtin::LessThanInteger, 45_290, 1, 45_831, 1),
             (Builtin::LessThanEqualsInteger, 43_837, 1, 44_389, 1),
@@ -648,6 +764,185 @@ mod tests {
         assert!(costs.builtin_cost(Builtin::AddInteger, 1, 2).is_ok());
     }
 
+    const DIVISION_MODELS: [(Builtin, usize, bool); 4] = [
+        (Builtin::DivideInteger, 49, true),
+        (Builtin::QuotientInteger, 130, true),
+        (Builtin::RemainderInteger, 141, false),
+        (Builtin::ModInteger, 114, false),
+    ];
+
+    #[test]
+    fn division_polynomials_map_each_coefficient_and_distinguish_every_branch() {
+        for (builtin, index, subtracted) in DIVISION_MODELS {
+            let mut parameters = vec![0; PARAMETER_COUNT];
+            // Distinct values expose transposed polynomial coefficients.
+            parameters[index..index + 8].copy_from_slice(&[101, 11, 13, 17, 19, 23, 29, 7]);
+            parameters[index + 8] = 31;
+            if subtracted {
+                parameters[index + 9] = 2;
+                parameters[index + 10] = 37;
+            } else {
+                parameters[index + 9] = 37;
+            }
+            let costs = MachineCosts::from_parameters(&parameters).unwrap();
+            let symmetric = matches!(builtin, Builtin::DivideInteger | Builtin::ModInteger);
+            for (x, y, cpu, mem) in [
+                (3, 2, 561, 105),
+                (
+                    2,
+                    3,
+                    if symmetric { 561 } else { 101 },
+                    if subtracted { 105 } else { 142 },
+                ),
+                (3, 3, 728, if subtracted { 105 } else { 142 }),
+                (2, 2, 351, 105),
+                (5, 2, 1155, if subtracted { 142 } else { 105 }),
+            ] {
+                assert_eq!(
+                    costs.builtin_cost(builtin, x, y),
+                    Ok(BuiltinBudget { cpu, mem }),
+                    "{builtin} {x} {y}"
+                );
+            }
+            // The polynomial minimum is on its final CPU value. It must not
+            // affect the strict x<y constant branch of quotient/remainder.
+            parameters[index + 7] = 900;
+            let costs = MachineCosts::from_parameters(&parameters).unwrap();
+            assert_eq!(costs.builtin_cost(builtin, 3, 3).unwrap().cpu, 900);
+            assert_eq!(
+                costs.builtin_cost(builtin, 2, 3).unwrap().cpu,
+                if symmetric { 900 } else { 101 }
+            );
+            // AboveAndBelowDiagonal truly ignores its constant, even negative.
+            parameters[index] = -1;
+            let costs = MachineCosts::from_parameters(&parameters).unwrap();
+            if symmetric {
+                assert_eq!(costs.builtin_cost(builtin, 2, 3).unwrap().cpu, 900);
+            } else {
+                assert_eq!(
+                    costs.builtin_cost(builtin, 2, 3),
+                    Err(BuiltinCostError::NegativeComputedCharge {
+                        dimension: Dimension::Cpu
+                    })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn division_memory_applies_signed_minimum_before_slope_without_extra_clamps() {
+        for (builtin, index, subtracted) in DIVISION_MODELS {
+            let mut parameters = vec![0; PARAMETER_COUNT];
+            parameters[index + 8] = 31;
+            if subtracted {
+                parameters[index + 9] = -5;
+                parameters[index + 10] = -7;
+            } else {
+                parameters[index + 9] = -7;
+            }
+            let costs = MachineCosts::from_parameters(&parameters).unwrap();
+            for (x, y, expected) in if subtracted {
+                [(2, 5, 52), (5, 2, 10), (2, 10, 66), (3, 3, 31)]
+            } else {
+                [(1, 1, 24), (5, 2, 17), (2, 3, 10), (3, 4, 3)]
+            } {
+                assert_eq!(
+                    costs.builtin_cost(builtin, x, y),
+                    Ok(BuiltinBudget {
+                        cpu: 0,
+                        mem: expected
+                    })
+                );
+            }
+            let (x, y) = if subtracted { (10, 2) } else { (2, 5) };
+            assert_eq!(
+                costs.builtin_cost(builtin, x, y),
+                Err(BuiltinCostError::NegativeComputedCharge {
+                    dimension: Dimension::Mem
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn division_costs_preserve_large_signed_cancellation_and_only_official_minima() {
+        for (builtin, index, _) in DIVISION_MODELS {
+            let mut parameters = vec![0; PARAMETER_COUNT];
+            parameters[index + 1] = 23;
+            parameters[index + 2] = -i64::MAX;
+            parameters[index + 4] = i64::MAX;
+            parameters[index + 5] = -i64::MAX;
+            parameters[index + 6] = i64::MAX;
+            let costs = MachineCosts::from_parameters(&parameters).unwrap();
+            // Linear and quadratic terms cancel at x=y; each quadratic term
+            // separately exceeds i128. An intermediate overflow is not a cost.
+            assert_eq!(
+                costs.builtin_cost(builtin, u64::MAX, u64::MAX),
+                Ok(BuiltinBudget { cpu: 23, mem: 0 })
+            );
+            parameters[index + 6] = 0;
+            parameters[index + 7] = 17;
+            let costs = MachineCosts::from_parameters(&parameters).unwrap();
+            // A huge negative polynomial still has the supplied positive floor.
+            assert_eq!(
+                costs.builtin_cost(builtin, u64::MAX, u64::MAX),
+                Ok(BuiltinBudget { cpu: 17, mem: 0 })
+            );
+            parameters[index + 7] = -100;
+            let costs = MachineCosts::from_parameters(&parameters).unwrap();
+            assert_eq!(
+                costs.builtin_cost(builtin, u64::MAX, u64::MAX),
+                Err(BuiltinCostError::NegativeComputedCharge {
+                    dimension: Dimension::Cpu
+                })
+            );
+            parameters[index + 5] = i64::MAX;
+            let costs = MachineCosts::from_parameters(&parameters).unwrap();
+            assert_eq!(
+                costs.builtin_cost(builtin, u64::MAX, u64::MAX),
+                Err(BuiltinCostError::Overflow)
+            );
+            parameters[index + 8] = -1;
+            let costs = MachineCosts::from_parameters(&parameters).unwrap();
+            assert_eq!(
+                costs.builtin_cost(builtin, u64::MAX, u64::MAX),
+                Err(BuiltinCostError::NegativeComputedCharge {
+                    dimension: Dimension::Mem
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn fixture_division_costs_are_asymmetric_only_where_the_model_requires() {
+        let costs = MachineCosts::from_parameters(&fixture_parameters()).unwrap();
+        for (builtin, _, subtracted) in DIVISION_MODELS {
+            for (x, y, symmetric_cpu, branched_cpu) in [
+                (1, 2, 135_188, 85_848),
+                (2, 1, 135_188, 135_188),
+                (2, 2, 141_713, 141_713),
+                (4096, 1, 967_391_816, 967_391_816),
+                (4096, 4096, 2_000_007_491, 2_000_007_491),
+            ] {
+                assert_eq!(
+                    costs.builtin_cost(builtin, x, y),
+                    Ok(BuiltinBudget {
+                        cpu: if matches!(builtin, Builtin::DivideInteger | Builtin::ModInteger) {
+                            symmetric_cpu
+                        } else {
+                            branched_cpu
+                        },
+                        mem: if subtracted {
+                            (i128::from(x) - i128::from(y)).max(1)
+                        } else {
+                            i128::from(y)
+                        },
+                    })
+                );
+            }
+        }
+    }
+
     #[test]
     fn zero_builtin_coefficients_remain_zero_for_every_size() {
         let costs = MachineCosts::from_parameters(&vec![0; PARAMETER_COUNT]).unwrap();
@@ -655,6 +950,10 @@ mod tests {
             Builtin::AddInteger,
             Builtin::SubtractInteger,
             Builtin::MultiplyInteger,
+            Builtin::DivideInteger,
+            Builtin::QuotientInteger,
+            Builtin::RemainderInteger,
+            Builtin::ModInteger,
             Builtin::EqualsInteger,
             Builtin::LessThanInteger,
             Builtin::LessThanEqualsInteger,

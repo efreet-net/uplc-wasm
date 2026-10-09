@@ -4,7 +4,7 @@
 //! `PlutusCore/Default/Builtins.hs` (tags, signatures, denotations),
 //! `PlutusCore/Default/Universe/Cardano.hs` and `Default/Universe.hs` (variant E
 //! input bounds), and `Evaluation/Machine/ExMemoryUsage.hs` (64-bit memory units).
-//! All seven functions belong to the original builtin batch and are available
+//! All eleven functions belong to the original builtin batch and are available
 //! in PlutusV3 / protocol 11, whose builtin semantics variant is E.
 //!
 //! The CEK machine owns forcing, argument collection, charging, and opaque
@@ -30,6 +30,10 @@ pub enum Builtin {
     AddInteger,
     SubtractInteger,
     MultiplyInteger,
+    DivideInteger,
+    QuotientInteger,
+    RemainderInteger,
+    ModInteger,
     EqualsInteger,
     LessThanInteger,
     LessThanEqualsInteger,
@@ -74,6 +78,10 @@ impl Builtin {
             Self::AddInteger => 0,
             Self::SubtractInteger => 1,
             Self::MultiplyInteger => 2,
+            Self::DivideInteger => 3,
+            Self::QuotientInteger => 4,
+            Self::RemainderInteger => 5,
+            Self::ModInteger => 6,
             Self::EqualsInteger => 7,
             Self::LessThanInteger => 8,
             Self::LessThanEqualsInteger => 9,
@@ -88,6 +96,10 @@ impl Builtin {
             0 => Some(Self::AddInteger),
             1 => Some(Self::SubtractInteger),
             2 => Some(Self::MultiplyInteger),
+            3 => Some(Self::DivideInteger),
+            4 => Some(Self::QuotientInteger),
+            5 => Some(Self::RemainderInteger),
+            6 => Some(Self::ModInteger),
             7 => Some(Self::EqualsInteger),
             8 => Some(Self::LessThanInteger),
             9 => Some(Self::LessThanEqualsInteger),
@@ -101,6 +113,10 @@ impl Builtin {
             Self::AddInteger => "addInteger",
             Self::SubtractInteger => "subtractInteger",
             Self::MultiplyInteger => "multiplyInteger",
+            Self::DivideInteger => "divideInteger",
+            Self::QuotientInteger => "quotientInteger",
+            Self::RemainderInteger => "remainderInteger",
+            Self::ModInteger => "modInteger",
             Self::EqualsInteger => "equalsInteger",
             Self::LessThanInteger => "lessThanInteger",
             Self::LessThanEqualsInteger => "lessThanEqualsInteger",
@@ -173,8 +189,10 @@ impl Builtin {
     /// Portable implementation work units, separate from Plutus execution
     /// units. The machine debits these after the builtin charge and before
     /// execution. Maximum input word count bounds linear operations; the
-    /// product of word counts bounds multiplication. No internal BigInt limb
-    /// size or host pointer width participates. Even zero-cost models remain
+    /// product of word counts accounts for multiplication. Division charges
+    /// x*y + max(x,y), covering division and sign-adjustment traversal, including
+    /// zero-divisor calls. No internal BigInt limb size or host pointer width
+    /// participates. Even zero-cost models remain
     /// subject to the same cumulative work allowance.
     pub fn work_units(self, args: &[BuiltinArgument<'_>]) -> Result<usize, RuntimeError> {
         self.validate_arguments(args)?;
@@ -184,10 +202,15 @@ impl Builtin {
         let (left, right) = integer_arguments(args);
         let left = integer_memory(left);
         let right = integer_memory(right);
-        let work = if self == Self::MultiplyInteger {
-            left.checked_mul(right)
-        } else {
-            Some(left.max(right))
+        let work = match self {
+            Self::MultiplyInteger => left.checked_mul(right),
+            Self::DivideInteger
+            | Self::QuotientInteger
+            | Self::RemainderInteger
+            | Self::ModInteger => left
+                .checked_mul(right)
+                .and_then(|product| product.checked_add(left.max(right))),
+            _ => Some(left.max(right)),
         };
         work.and_then(|work| usize::try_from(work).ok())
             .ok_or_else(|| {
@@ -223,6 +246,35 @@ impl Builtin {
                 }
                 checked_integer_result(left * right)?
             }
+            Self::DivideInteger
+            | Self::QuotientInteger
+            | Self::RemainderInteger
+            | Self::ModInteger => {
+                // Pinned Builtins.hs uses nonZeroSecondArg in the denotation,
+                // not during CInteger unlifting. The machine has already
+                // charged the builtin and debited portable work at this point.
+                if right.sign() == Sign::NoSign {
+                    return Err(RuntimeError::BuiltinDivisionByZero { builtin: self });
+                }
+                let value = match self {
+                    Self::DivideInteger => floor_quotient(left, right),
+                    Self::QuotientInteger => left / right,
+                    Self::RemainderInteger => left % right,
+                    Self::ModInteger => {
+                        let remainder = left % right;
+                        if remainder.sign() != Sign::NoSign && remainder.sign() != right.sign() {
+                            remainder + right
+                        } else {
+                            remainder
+                        }
+                    }
+                    _ => unreachable!("division family"),
+                };
+                // All four E signatures return ordinary Integer. In particular
+                // minBound / -1 is permitted even though its result cannot be
+                // supplied to another CInteger argument.
+                checked_integer_result(value)?
+            }
             Self::EqualsInteger => Constant::Bool(left == right),
             Self::LessThanInteger => Constant::Bool(left < right),
             Self::LessThanEqualsInteger => Constant::Bool(left <= right),
@@ -230,6 +282,21 @@ impl Builtin {
         };
         Ok(BuiltinResult::Constant(result))
     }
+}
+
+fn floor_quotient(left: &BigInt, right: &BigInt) -> BigInt {
+    if left.sign() == Sign::NoSign || left.sign() == right.sign() {
+        return left / right;
+    }
+    // For a,b>0, floor(-a/b) = -trunc((a-1)/b)-1. Reduce the
+    // numerator magnitude by one before truncating, so exact and inexact
+    // divisions both need only one division and no oversized intermediate.
+    let reduced = if left.sign() == Sign::Minus {
+        left + 1
+    } else {
+        left - 1
+    };
+    reduced / right - 1
 }
 
 impl fmt::Display for Builtin {
@@ -280,10 +347,14 @@ fn checked_integer_result(value: BigInt) -> Result<Constant, RuntimeError> {
 mod tests {
     use super::*;
 
-    const INTEGER_BUILTINS: [Builtin; 6] = [
+    const INTEGER_BUILTINS: [Builtin; 10] = [
         Builtin::AddInteger,
         Builtin::SubtractInteger,
         Builtin::MultiplyInteger,
+        Builtin::DivideInteger,
+        Builtin::QuotientInteger,
+        Builtin::RemainderInteger,
+        Builtin::ModInteger,
         Builtin::EqualsInteger,
         Builtin::LessThanInteger,
         Builtin::LessThanEqualsInteger,
@@ -298,7 +369,7 @@ mod tests {
 
     #[test]
     fn metadata_matches_pinned_tags_and_signatures() {
-        for (builtin, tag) in INTEGER_BUILTINS.into_iter().zip([0, 1, 2, 7, 8, 9]) {
+        for (builtin, tag) in INTEGER_BUILTINS.into_iter().zip(0..=9) {
             assert_eq!(builtin.tag(), tag);
             assert_eq!(Builtin::from_tag(tag), Some(builtin));
             assert_eq!(builtin.force_count(), 0);
@@ -317,7 +388,7 @@ mod tests {
         for tag in 0..=127 {
             assert_eq!(
                 Builtin::from_tag(tag).is_some(),
-                [0, 1, 2, 7, 8, 9, 26].contains(&tag)
+                [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 26].contains(&tag)
             );
         }
     }
@@ -471,10 +542,13 @@ mod tests {
         for builtin in INTEGER_BUILTINS {
             assert_eq!(
                 builtin.work_units(&args).unwrap(),
-                if builtin == Builtin::MultiplyInteger {
-                    6
-                } else {
-                    3
+                match builtin {
+                    Builtin::MultiplyInteger => 6,
+                    Builtin::DivideInteger
+                    | Builtin::QuotientInteger
+                    | Builtin::RemainderInteger
+                    | Builtin::ModInteger => 9,
+                    _ => 3,
                 }
             );
         }
@@ -512,5 +586,119 @@ mod tests {
         }
         assert!(checked_integer_result(&outside - 1).is_ok());
         assert!(checked_integer_result(-&outside + 1).is_ok());
+    }
+
+    const DIVISION: [Builtin; 4] = [
+        Builtin::DivideInteger,
+        Builtin::QuotientInteger,
+        Builtin::RemainderInteger,
+        Builtin::ModInteger,
+    ];
+
+    fn integer_result(builtin: Builtin, left: &BigInt, right: &BigInt) -> BigInt {
+        let BuiltinResult::Constant(Constant::Integer(result)) =
+            call(builtin, left.clone(), right.clone()).unwrap()
+        else {
+            panic!("division must return integer")
+        };
+        result
+    }
+
+    #[test]
+    fn division_sign_table_covers_floor_truncation_exactness_and_zero() {
+        for (left, right, expected) in [
+            (7, 3, [2, 2, 1, 1]),
+            (-7, 3, [-3, -2, -1, 2]),
+            (7, -3, [-3, -2, 1, -2]),
+            (-7, -3, [2, 2, -1, -1]),
+            (6, 3, [2, 2, 0, 0]),
+            (-6, 3, [-2, -2, 0, 0]),
+            (6, -3, [-2, -2, 0, 0]),
+            (-6, -3, [2, 2, 0, 0]),
+            (1, 3, [0, 0, 1, 1]),
+            (-1, 3, [-1, 0, -1, 2]),
+            (1, -3, [-1, 0, 1, -2]),
+            (-1, -3, [0, 0, -1, -1]),
+            (3, 3, [1, 1, 0, 0]),
+            (-3, 3, [-1, -1, 0, 0]),
+            (0, 1, [0, 0, 0, 0]),
+            (0, -1, [0, 0, 0, 0]),
+            (-1, -1, [1, 1, 0, 0]),
+        ] {
+            for (builtin, expected) in DIVISION.into_iter().zip(expected) {
+                assert_eq!(
+                    integer_result(builtin, &left.into(), &right.into()),
+                    BigInt::from(expected),
+                    "{builtin} {left} {right}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn division_results_satisfy_unique_integer_quotient_and_remainder_laws() {
+        // The reconstruction, magnitude and sign laws uniquely identify both
+        // pairs; expected values do not use the implementation's floor formula.
+        let large: BigInt = (BigInt::from(1) << 257) + 9007199254740993_u64;
+        let mut values = (-25..=25).map(BigInt::from).collect::<Vec<_>>();
+        for exponent in [31, 32, 63, 64, 127, 128] {
+            let power: BigInt = BigInt::from(1) << exponent;
+            values.extend([&power - 1, power.clone(), &power + 1, -&power]);
+        }
+        values.extend([large.clone(), -large]);
+        for left in &values {
+            for right in values.iter().filter(|value| value.sign() != Sign::NoSign) {
+                let [floor, trunc, rem, modulo] = DIVISION.map(|f| integer_result(f, left, right));
+                assert_eq!(left, &(&floor * right + &modulo));
+                assert_eq!(left, &(&trunc * right + &rem));
+                assert!(modulo.magnitude() < right.magnitude());
+                assert!(rem.magnitude() < right.magnitude());
+                assert!(modulo.sign() == Sign::NoSign || modulo.sign() == right.sign());
+                assert!(rem.sign() == Sign::NoSign || rem.sign() == left.sign());
+            }
+        }
+    }
+
+    #[test]
+    fn each_division_signature_bounds_both_arguments_but_not_its_result() {
+        let boundary = BigInt::from(1) << CARDANO_INTEGER_MAXIMUM_BITS;
+        for builtin in DIVISION {
+            for value in [&boundary - 1, -&boundary] {
+                for args in [[value.clone(), 1.into()], [1.into(), value]] {
+                    assert!(call(builtin, args[0].clone(), args[1].clone()).is_ok());
+                }
+            }
+            for value in [boundary.clone(), -&boundary - 1] {
+                for argument in [0, 1] {
+                    let mut args = [BigInt::from(1), BigInt::from(1)];
+                    args[argument] = value.clone();
+                    assert_eq!(
+                        call(builtin, args[0].clone(), args[1].clone()),
+                        Err(RuntimeError::BuiltinIntegerOutOfBounds { builtin, argument })
+                    );
+                }
+            }
+            let expected = match builtin {
+                Builtin::DivideInteger | Builtin::QuotientInteger => boundary.clone(),
+                _ => 0.into(),
+            };
+            assert_eq!(integer_result(builtin, &-&boundary, &(-1).into()), expected);
+        }
+    }
+
+    #[test]
+    fn zero_divisor_is_denotation_failure_after_successful_unlifting_and_work() {
+        for builtin in DIVISION {
+            for value in [-1, 0, 1] {
+                let args = [Constant::Integer(value.into()), Constant::Integer(0.into())];
+                let args = args.each_ref().map(BuiltinArgument::Constant);
+                assert_eq!(builtin.validate_arguments(&args), Ok(()));
+                assert_eq!(builtin.work_units(&args), Ok(2));
+                assert_eq!(
+                    builtin.evaluate(&args),
+                    Err(RuntimeError::BuiltinDivisionByZero { builtin })
+                );
+            }
+        }
     }
 }

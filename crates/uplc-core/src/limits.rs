@@ -22,3 +22,6 @@ pub const MAX_OUTPUT_DEPTH: usize = 128;
 pub const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 /// Independent work bound, including under a supplied model with zero costs.
 pub const MAX_MACHINE_STEPS: usize = 10_000_000;
+/// Aggregate magnitude/string/bytes payload of constants produced at runtime.
+/// Input constants remain borrowed; the arena never stores another input copy.
+pub const MAX_RUNTIME_CONSTANT_BYTES: usize = 8 * 1024 * 1024;

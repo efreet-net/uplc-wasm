@@ -1,7 +1,7 @@
-//! Explicit PlutusV3/protocol-11 machine costs and restricting budget accounting.
+//! Explicit PlutusV3/protocol-11 machine/builtin costs and restricting budgets.
 //!
 //! There are no default coefficients. Every model is constructed from the supplied
-//! 350-entry ledger parameter vector. This module does not implement builtin costs.
+//! 350-entry ledger parameter vector. Builtin charges use the profile's semantics E.
 //! Each submitted charge is checked immediately. The CEK machine submits startup
 //! directly and otherwise batches up to 200 compute events in the official step
 //! order; see [`crate::machine`]. An explicit error has no charge of its own and
@@ -16,6 +16,8 @@
 
 use std::fmt;
 
+use crate::builtin::Builtin;
+
 pub const PARAMETER_COUNT: usize = 350;
 
 /// CPU and memory units, with no floating-point conversions at any boundary.
@@ -23,6 +25,103 @@ pub const PARAMETER_COUNT: usize = 350;
 pub struct ExecutionBudget {
     pub cpu: i64,
     pub mem: i64,
+}
+
+/// A builtin application's cost before checking the restricting and wire limits.
+/// Keeping the wider value prevents a large valid coefficient from wrapping at
+/// the i64 boundary before it reaches the meter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuiltinBudget {
+    pub cpu: i128,
+    pub mem: i128,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinCostError {
+    /// Signed coefficients are valid; a negative resulting charge is unsupported.
+    NegativeComputedCharge { dimension: Dimension },
+    /// A positive charge exceeds the checked arithmetic range, and therefore any
+    /// representable restricting limit. Metering this error gives a null budget.
+    Overflow,
+}
+
+impl fmt::Display for BuiltinCostError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NegativeComputedCharge { dimension } => {
+                write!(f, "computed builtin {dimension} charge is negative")
+            }
+            Self::Overflow => {
+                f.write_str("computed builtin charge exceeds checked arithmetic range")
+            }
+        }
+    }
+}
+
+impl std::error::Error for BuiltinCostError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LinearCost {
+    intercept: i64,
+    slope: i64,
+}
+
+impl LinearCost {
+    fn constant(value: i64) -> Self {
+        Self {
+            intercept: value,
+            slope: 0,
+        }
+    }
+
+    fn evaluate(self, size: u128, dimension: Dimension) -> Result<i128, BuiltinCostError> {
+        // With two u64 input sizes, the size product is exact in u128. Avoid
+        // converting that product when the slope is zero: a zero custom model
+        // must remain zero even for artificial sizes above i128::MAX.
+        let scaled = if self.slope == 0 {
+            Some(0)
+        } else {
+            i128::try_from(size)
+                .ok()
+                .and_then(|size| i128::from(self.slope).checked_mul(size))
+        };
+        let charge = scaled.and_then(|scaled| scaled.checked_add(i128::from(self.intercept)));
+        let Some(charge) = charge else {
+            // An i64 intercept cannot cancel an overflowing magnitude enough
+            // to make a positive charge fit the i64 wire range, or a negative
+            // charge nonnegative. Classifying by slope preserves both policies.
+            return Err(if self.slope < 0 {
+                BuiltinCostError::NegativeComputedCharge { dimension }
+            } else {
+                BuiltinCostError::Overflow
+            });
+        };
+        if charge < 0 {
+            return Err(BuiltinCostError::NegativeComputedCharge { dimension });
+        }
+        Ok(charge)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BuiltinCoefficients {
+    cpu: LinearCost,
+    mem: LinearCost,
+}
+
+impl BuiltinCoefficients {
+    fn evaluate(self, cpu_size: u128, mem_size: u128) -> Result<BuiltinBudget, BuiltinCostError> {
+        let cpu = self.cpu.evaluate(cpu_size, Dimension::Cpu);
+        let mem = self.mem.evaluate(mem_size, Dimension::Mem);
+        match (cpu, mem) {
+            // A negative dimension makes the computed model unsupported even
+            // when the other dimension is too large to charge.
+            (Err(error @ BuiltinCostError::NegativeComputedCharge { .. }), _)
+            | (_, Err(error @ BuiltinCostError::NegativeComputedCharge { .. })) => Err(error),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+            (Ok(cpu), Ok(mem)) => Ok(BuiltinBudget { cpu, mem }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +149,7 @@ pub enum Step {
     Apply,
     Delay,
     Force,
+    Builtin,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,12 +183,20 @@ pub struct MachineCosts {
     apply: ExecutionBudget,
     delay: ExecutionBudget,
     force: ExecutionBudget,
+    builtin: ExecutionBudget,
+    add_integer: BuiltinCoefficients,
+    subtract_integer: BuiltinCoefficients,
+    multiply_integer: BuiltinCoefficients,
+    equals_integer: BuiltinCoefficients,
+    less_than_integer: BuiltinCoefficients,
+    less_than_equals_integer: BuiltinCoefficients,
+    if_then_else: BuiltinCoefficients,
 }
 
 impl MachineCosts {
     /// Read exact ledger-order coefficients; neither profile IDs nor defaults are used.
     /// Negative builtin polynomial coefficients are allowed. Every machine cost,
-    /// including the reserved builtin/constr/case events, must be nonnegative.
+    /// including the reserved constr/case events, must be nonnegative.
     pub fn from_parameters(parameters: &[i64]) -> Result<Self, ModelError> {
         if parameters.len() != PARAMETER_COUNT {
             return Err(ModelError::WrongParameterCount {
@@ -116,6 +224,18 @@ impl MachineCosts {
             cpu: parameters[cpu_index],
             mem: parameters[cpu_index + 1],
         };
+        let linear = |index: usize| LinearCost {
+            intercept: parameters[index],
+            slope: parameters[index + 1],
+        };
+        let linear_pair = |index: usize| BuiltinCoefficients {
+            cpu: linear(index),
+            mem: linear(index + 2),
+        };
+        let comparison = |index: usize| BuiltinCoefficients {
+            cpu: linear(index),
+            mem: LinearCost::constant(parameters[index + 2]),
+        };
         Ok(Self {
             startup: pair(29),
             var: pair(31),
@@ -124,6 +244,17 @@ impl MachineCosts {
             apply: pair(17),
             delay: pair(23),
             force: pair(25),
+            builtin: pair(19),
+            add_integer: linear_pair(0),
+            subtract_integer: linear_pair(167),
+            multiply_integer: linear_pair(124),
+            equals_integer: comparison(71),
+            less_than_integer: comparison(99),
+            less_than_equals_integer: comparison(96),
+            if_then_else: BuiltinCoefficients {
+                cpu: LinearCost::constant(parameters[84]),
+                mem: LinearCost::constant(parameters[85]),
+            },
         })
     }
 
@@ -136,7 +267,45 @@ impl MachineCosts {
             Step::Apply => self.apply,
             Step::Delay => self.delay,
             Step::Force => self.force,
+            Step::Builtin => self.builtin,
         }
+    }
+
+    /// Compute one fully saturated builtin application from argument memory
+    /// units. The caller validates types and profile input bounds first; partial
+    /// applications, bad forces, and unlifting failures have no builtin charge.
+    /// `ifThenElse` ignores both sizes because both of its costs are constant.
+    ///
+    /// Formula shapes are from pinned Plutus `builtinCostModelE.json`, with
+    /// `CostingFun/Core.hs:627-659` defining added/multiplied/min/max sizes.
+    /// Integer arguments have singleton memory streams, so every supported
+    /// formula produces one atomic CPU/memory charge. Shape E applies to V3/PV11
+    /// per `PlutusLedgerApi/Common/ProtocolVersions.hs:136-138`; coefficients
+    /// always come from the request, not from the JSON model's example values.
+    pub fn builtin_cost(
+        &self,
+        builtin: Builtin,
+        x: u64,
+        y: u64,
+    ) -> Result<BuiltinBudget, BuiltinCostError> {
+        let maximum = u128::from(x.max(y));
+        let minimum = u128::from(x.min(y));
+        let (coefficients, cpu_size, mem_size) = match builtin {
+            Builtin::AddInteger => (self.add_integer, maximum, maximum),
+            Builtin::SubtractInteger => (self.subtract_integer, maximum, maximum),
+            Builtin::MultiplyInteger => {
+                // A sum or product of two u64 values is exact in u128, even on
+                // wasm32. Coefficient arithmetic is checked separately above.
+                let product = u128::from(x) * u128::from(y);
+                let sum = u128::from(x) + u128::from(y);
+                (self.multiply_integer, product, sum)
+            }
+            Builtin::EqualsInteger => (self.equals_integer, minimum, 0),
+            Builtin::LessThanInteger => (self.less_than_integer, minimum, 0),
+            Builtin::LessThanEqualsInteger => (self.less_than_equals_integer, minimum, 0),
+            Builtin::IfThenElse => (self.if_then_else, 0, 0),
+        };
+        coefficients.evaluate(cpu_size, mem_size)
     }
 }
 
@@ -204,6 +373,26 @@ impl BudgetMeter {
         self.charge_repeated(cost, 1)
     }
 
+    /// Charge a saturated, correctly typed builtin immediately, without flushing
+    /// pending CEK events. Arithmetic overflow is terminal budget exhaustion;
+    /// negative computed charges are terminal API errors and must be exposed as
+    /// unsupported custom models, never as semantic UPLC failures.
+    pub fn charge_builtin(
+        &mut self,
+        cost: Result<BuiltinBudget, BuiltinCostError>,
+    ) -> Result<(), BudgetError> {
+        if let Some(error) = self.terminal {
+            return Err(error);
+        }
+        match cost {
+            Ok(cost) => self.charge_wide(cost),
+            Err(BuiltinCostError::NegativeComputedCharge { dimension }) => {
+                self.fail(BudgetError::NegativeCharge { dimension })
+            }
+            Err(BuiltinCostError::Overflow) => self.fail(BudgetError::Overflow),
+        }
+    }
+
     /// Submit a batch of identical events. Multiplication happens in checked
     /// i128 arithmetic before addition or comparison, so an overflowing i64 batch
     /// is budget exhaustion with no representable consumed budget, never wrapping.
@@ -226,18 +415,32 @@ impl BudgetMeter {
             });
         }
 
-        // Each coefficient is at most i64::MAX, count is u32, and the prior
-        // successful total is at most i64::MAX. Check both operations regardless.
-        let Some(cpu) = i128::from(cost.cpu)
-            .checked_mul(i128::from(count))
-            .and_then(|charge| self.cpu.checked_add(charge))
-        else {
+        // Each coefficient is at most i64::MAX and count is u32. Check both
+        // multiplications regardless, then use the same atomic meter as builtins.
+        let Some(cpu) = i128::from(cost.cpu).checked_mul(i128::from(count)) else {
             return self.fail(BudgetError::Overflow);
         };
-        let Some(mem) = i128::from(cost.mem)
-            .checked_mul(i128::from(count))
-            .and_then(|charge| self.mem.checked_add(charge))
-        else {
+        let Some(mem) = i128::from(cost.mem).checked_mul(i128::from(count)) else {
+            return self.fail(BudgetError::Overflow);
+        };
+        self.charge_wide(BuiltinBudget { cpu, mem })
+    }
+
+    fn charge_wide(&mut self, cost: BuiltinBudget) -> Result<(), BudgetError> {
+        if cost.cpu < 0 {
+            return self.fail(BudgetError::NegativeCharge {
+                dimension: Dimension::Cpu,
+            });
+        }
+        if cost.mem < 0 {
+            return self.fail(BudgetError::NegativeCharge {
+                dimension: Dimension::Mem,
+            });
+        }
+        let Some(cpu) = self.cpu.checked_add(cost.cpu) else {
+            return self.fail(BudgetError::Overflow);
+        };
+        let Some(mem) = self.mem.checked_add(cost.mem) else {
             return self.fail(BudgetError::Overflow);
         };
         self.cpu = cpu;
@@ -300,6 +503,7 @@ mod tests {
             (Step::Apply, 17, 18),
             (Step::Delay, 23, 24),
             (Step::Force, 25, 26),
+            (Step::Builtin, 19, 20),
         ] {
             assert_eq!(costs.cost(step), ExecutionBudget { cpu, mem });
         }
@@ -321,6 +525,7 @@ mod tests {
             Step::Apply,
             Step::Delay,
             Step::Force,
+            Step::Builtin,
         ] {
             assert_eq!(
                 costs.cost(step),
@@ -341,6 +546,163 @@ mod tests {
             }
         );
         assert_eq!(custom.cost(Step::Var), costs.cost(Step::Var));
+    }
+
+    #[test]
+    fn builtin_parameter_positions_and_formula_shapes_are_distinct() {
+        let parameters: Vec<i64> = (0..PARAMETER_COUNT).map(|index| index as i64).collect();
+        let costs = MachineCosts::from_parameters(&parameters).unwrap();
+        // Asymmetric sizes distinguish max/min, product/sum, and every offset.
+        // Expected arithmetic follows official V3 ParamName order and model E.
+        for (builtin, cpu, mem) in [
+            (Builtin::AddInteger, 5, 17),
+            (Builtin::SubtractInteger, 1_007, 1_019),
+            (Builtin::MultiplyInteger, 1_374, 1_015),
+            (Builtin::EqualsInteger, 215, 73),
+            (Builtin::LessThanInteger, 299, 101),
+            (Builtin::LessThanEqualsInteger, 290, 98),
+            (Builtin::IfThenElse, 84, 85),
+        ] {
+            let expected = Ok(BuiltinBudget { cpu, mem });
+            assert_eq!(costs.builtin_cost(builtin, 2, 5), expected);
+            assert_eq!(costs.builtin_cost(builtin, 5, 2), expected);
+        }
+    }
+
+    #[test]
+    fn supplied_builtin_vector_matches_independent_single_word_and_large_costs() {
+        let costs = MachineCosts::from_parameters(&fixture_parameters()).unwrap();
+        // Single-word costs also reproduce the unchanged official *-01 budget
+        // goldens after 100/100 startup and five 16000/100 CEK events. The
+        // ifThenElse-01 program has eight CEK events (including its force).
+        for (builtin, one_cpu, one_mem, larger_cpu, larger_mem) in [
+            (Builtin::AddInteger, 101_208, 2, 102_888, 6),
+            (Builtin::SubtractInteger, 101_208, 2, 102_888, 6),
+            (Builtin::MultiplyInteger, 90_953, 2, 95_624, 7),
+            (Builtin::EqualsInteger, 52_333, 1, 52_891, 1),
+            (Builtin::LessThanInteger, 45_290, 1, 45_831, 1),
+            (Builtin::LessThanEqualsInteger, 43_837, 1, 44_389, 1),
+            (Builtin::IfThenElse, 76_049, 1, 76_049, 1),
+        ] {
+            assert_eq!(
+                costs.builtin_cost(builtin, 1, 1),
+                Ok(BuiltinBudget {
+                    cpu: one_cpu,
+                    mem: one_mem,
+                })
+            );
+            assert_eq!(
+                costs.builtin_cost(builtin, 2, 5),
+                Ok(BuiltinBudget {
+                    cpu: larger_cpu,
+                    mem: larger_mem,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn signed_builtin_coefficients_are_preserved_until_evaluation() {
+        let mut parameters = vec![0; PARAMETER_COUNT];
+        parameters[0] = -3;
+        parameters[1] = 2;
+        parameters[2] = 8;
+        parameters[3] = -2;
+        let costs = MachineCosts::from_parameters(&parameters).unwrap();
+        assert_eq!(
+            costs.builtin_cost(Builtin::AddInteger, 2, 3),
+            Ok(BuiltinBudget { cpu: 3, mem: 2 })
+        );
+        assert_eq!(
+            costs.builtin_cost(Builtin::AddInteger, 1, 1),
+            Err(BuiltinCostError::NegativeComputedCharge {
+                dimension: Dimension::Cpu,
+            })
+        );
+        assert_eq!(
+            costs.builtin_cost(Builtin::AddInteger, 1, 5),
+            Err(BuiltinCostError::NegativeComputedCharge {
+                dimension: Dimension::Mem,
+            })
+        );
+        parameters[0] = i64::MIN;
+        parameters[1] = i64::MAX;
+        parameters[2] = 4;
+        let costs = MachineCosts::from_parameters(&parameters).unwrap();
+        assert_eq!(
+            costs.builtin_cost(Builtin::AddInteger, 1, 2),
+            Ok(BuiltinBudget {
+                cpu: i128::from(i64::MAX) - 1,
+                mem: 0,
+            })
+        );
+        // Unused negative builtin coefficients do not reject the entire model.
+        parameters[84] = -1;
+        let costs = MachineCosts::from_parameters(&parameters).unwrap();
+        assert_eq!(
+            costs.builtin_cost(Builtin::IfThenElse, 0, 0),
+            Err(BuiltinCostError::NegativeComputedCharge {
+                dimension: Dimension::Cpu,
+            })
+        );
+        assert!(costs.builtin_cost(Builtin::AddInteger, 1, 2).is_ok());
+    }
+
+    #[test]
+    fn zero_builtin_coefficients_remain_zero_for_every_size() {
+        let costs = MachineCosts::from_parameters(&vec![0; PARAMETER_COUNT]).unwrap();
+        for builtin in [
+            Builtin::AddInteger,
+            Builtin::SubtractInteger,
+            Builtin::MultiplyInteger,
+            Builtin::EqualsInteger,
+            Builtin::LessThanInteger,
+            Builtin::LessThanEqualsInteger,
+            Builtin::IfThenElse,
+        ] {
+            for (x, y) in [(0, 0), (1, 1), (2, 5), (u64::MAX, u64::MAX)] {
+                let charge = costs.builtin_cost(builtin, x, y);
+                assert_eq!(charge, Ok(BuiltinBudget { cpu: 0, mem: 0 }));
+                let mut meter = BudgetMeter::new(ExecutionBudget { cpu: 0, mem: 0 }).unwrap();
+                assert_eq!(meter.charge_builtin(charge), Ok(()));
+                assert_eq!(meter.consumed(), Some(ExecutionBudget { cpu: 0, mem: 0 }));
+            }
+        }
+    }
+
+    #[test]
+    fn builtin_expression_overflow_never_wraps_or_masks_negative_charges() {
+        for index in [125, 127] {
+            let mut parameters = vec![0; PARAMETER_COUNT];
+            parameters[index] = i64::MAX;
+            let costs = MachineCosts::from_parameters(&parameters).unwrap();
+            assert_eq!(
+                costs.builtin_cost(Builtin::MultiplyInteger, u64::MAX, u64::MAX),
+                Err(BuiltinCostError::Overflow)
+            );
+            parameters[index] = i64::MIN;
+            let costs = MachineCosts::from_parameters(&parameters).unwrap();
+            assert_eq!(
+                costs.builtin_cost(Builtin::MultiplyInteger, u64::MAX, u64::MAX),
+                Err(BuiltinCostError::NegativeComputedCharge {
+                    dimension: if index == 125 {
+                        Dimension::Cpu
+                    } else {
+                        Dimension::Mem
+                    },
+                })
+            );
+        }
+        let mut parameters = vec![0; PARAMETER_COUNT];
+        parameters[125] = i64::MAX;
+        parameters[126] = -1;
+        let costs = MachineCosts::from_parameters(&parameters).unwrap();
+        assert_eq!(
+            costs.builtin_cost(Builtin::MultiplyInteger, u64::MAX, u64::MAX),
+            Err(BuiltinCostError::NegativeComputedCharge {
+                dimension: Dimension::Mem,
+            })
+        );
     }
 
     #[test]
@@ -535,6 +897,109 @@ mod tests {
             assert_eq!(meter.cpu, i128::from(cost.cpu) * i128::from(u32::MAX));
             assert_eq!(meter.mem, i128::from(cost.mem) * i128::from(u32::MAX));
             assert_eq!(meter.consumed(), None);
+        }
+    }
+
+    #[test]
+    fn builtin_charges_are_atomic_exact_and_terminal_on_exhaustion() {
+        let cost = BuiltinBudget { cpu: 23, mem: 7 };
+        for (limits, expected) in [
+            (ExecutionBudget { cpu: 23, mem: 7 }, Ok(())),
+            (
+                ExecutionBudget { cpu: 22, mem: 7 },
+                Err(BudgetError::Exhausted),
+            ),
+            (
+                ExecutionBudget { cpu: 23, mem: 6 },
+                Err(BudgetError::Exhausted),
+            ),
+            (
+                ExecutionBudget { cpu: 0, mem: 0 },
+                Err(BudgetError::Exhausted),
+            ),
+        ] {
+            let mut meter = BudgetMeter::new(limits).unwrap();
+            assert_eq!(meter.charge_builtin(Ok(cost)), expected);
+            assert_eq!(meter.consumed(), Some(ExecutionBudget { cpu: 23, mem: 7 }));
+            if let Err(error) = expected {
+                assert_eq!(
+                    meter.charge_builtin(Err(BuiltinCostError::Overflow)),
+                    Err(error)
+                );
+                assert_eq!(meter.consumed(), Some(ExecutionBudget { cpu: 23, mem: 7 }));
+            }
+        }
+    }
+
+    #[test]
+    fn builtin_wide_charges_and_unrepresentable_totals_have_null_budgets() {
+        let maximum = ExecutionBudget {
+            cpu: i64::MAX,
+            mem: i64::MAX,
+        };
+        let beyond_wire = i128::from(i64::MAX) + 1;
+        for cost in [
+            BuiltinBudget {
+                cpu: beyond_wire,
+                mem: 7,
+            },
+            BuiltinBudget {
+                cpu: 23,
+                mem: beyond_wire,
+            },
+        ] {
+            let mut meter = BudgetMeter::new(maximum).unwrap();
+            assert_eq!(meter.charge_builtin(Ok(cost)), Err(BudgetError::Overflow));
+            assert_eq!((meter.cpu, meter.mem), (cost.cpu, cost.mem));
+            assert_eq!(meter.consumed(), None);
+            assert_eq!(
+                meter.charge_builtin(Ok(BuiltinBudget { cpu: 0, mem: 0 })),
+                Err(BudgetError::Overflow)
+            );
+            assert_eq!((meter.cpu, meter.mem), (cost.cpu, cost.mem));
+        }
+        for cost in [
+            BuiltinBudget { cpu: 1, mem: 0 },
+            BuiltinBudget { cpu: 0, mem: 1 },
+            BuiltinBudget {
+                cpu: i128::MAX,
+                mem: i128::MAX,
+            },
+        ] {
+            let mut meter = BudgetMeter::new(maximum).unwrap();
+            meter.charge(maximum).unwrap();
+            assert_eq!(meter.charge_builtin(Ok(cost)), Err(BudgetError::Overflow));
+            assert_eq!(meter.consumed(), None);
+        }
+        let mut meter = BudgetMeter::new(maximum).unwrap();
+        meter.charge(ExecutionBudget { cpu: 3, mem: 5 }).unwrap();
+        assert_eq!(
+            meter.charge_builtin(Err(BuiltinCostError::Overflow)),
+            Err(BudgetError::Overflow)
+        );
+        assert_eq!(meter.consumed(), None);
+        assert_eq!(
+            meter.charge_builtin(Ok(BuiltinBudget { cpu: 0, mem: 0 })),
+            Err(BudgetError::Overflow)
+        );
+    }
+
+    #[test]
+    fn negative_builtin_computations_never_credit_the_meter() {
+        for dimension in [Dimension::Cpu, Dimension::Mem] {
+            let mut meter = BudgetMeter::new(ExecutionBudget { cpu: 100, mem: 100 }).unwrap();
+            let startup = ExecutionBudget { cpu: 3, mem: 5 };
+            meter.charge(startup).unwrap();
+            assert_eq!(
+                meter.charge_builtin(Err(BuiltinCostError::NegativeComputedCharge { dimension })),
+                Err(BudgetError::NegativeCharge { dimension })
+            );
+            assert_eq!(meter.consumed(), Some(startup));
+            assert_eq!(
+                meter.charge_builtin(Ok(BuiltinBudget { cpu: 1, mem: 1 })),
+                Err(BudgetError::NegativeCharge { dimension })
+            );
+            assert_eq!(meter.consumed(), Some(startup));
         }
     }
 }

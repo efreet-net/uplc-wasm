@@ -10,6 +10,7 @@ use num_bigint::BigInt;
 use serde_json::{Value, json};
 
 use crate::{
+    builtin::Builtin,
     error::{DecodeError, RuntimeError},
     limits::{
         MAX_AST_DEPTH, MAX_AST_NODES, MAX_CONSTANT_BYTES, MAX_INTEGER_BYTES, MAX_OUTPUT_BYTES,
@@ -36,6 +37,7 @@ pub enum Term {
     Apply { function: TermId, argument: TermId },
     Constant(Constant),
     Force(TermId),
+    Builtin(Builtin),
     Error,
 }
 
@@ -161,6 +163,9 @@ impl Program {
                         values.push(json!(["constant", constant.normalize()]));
                     }
                     Term::Var(index) => values.push(json!(["var", index.to_string()])),
+                    Term::Builtin(builtin) => {
+                        values.push(json!(["builtin", builtin.tag().to_string()]))
+                    }
                     Term::Error => values.push(json!(["error"])),
                 }
                 continue;
@@ -218,6 +223,7 @@ impl Program {
                 Term::Lambda(_) => 11,
                 Term::Apply { .. } => 11,
                 Term::Error => 9,
+                Term::Builtin(builtin) => 14 + builtin.tag().to_string().len(),
                 Term::Constant(constant) => {
                     if depth + 1 > MAX_OUTPUT_DEPTH {
                         return Err(unsupported(format!(

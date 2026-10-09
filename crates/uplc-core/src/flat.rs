@@ -14,8 +14,8 @@
 //! are valid. Zero variable indices are rejected by the specification's `n>0`
 //! rule, independently of the permissive raw reference APIs.
 //!
-//! Outside this milestone, decoding stops with `Unsupported`: builtin tags and
-//! complete constant type headers are checked first, but their payloads, later
+//! Outside this milestone, decoding stops with `Unsupported`: unimplemented
+//! builtin tags and complete constant type headers are checked first, but their payloads, later
 //! subterms, and final padding are not fully validated. Constr/case version gates
 //! are checked, and constr tags and the first fields-list bit are read. This is
 //! deliberately not a claim of malformed-input coverage for unsupported syntax.
@@ -25,6 +25,7 @@ use num_bigint::{BigInt, BigUint};
 
 use crate::{
     ast::{Constant, Program, Term},
+    builtin::Builtin,
     error::DecodeError,
     limits::{MAX_AST_DEPTH, MAX_AST_NODES, MAX_CONSTANT_BYTES, MAX_FLAT_BYTES, MAX_INTEGER_BYTES},
 };
@@ -85,13 +86,16 @@ pub fn decode(bytes: &[u8]) -> Result<Program, DecodeError> {
             7 => {
                 let tag = reader.bits(7)?;
                 // The pinned spec's six builtin batches have contiguous tags
-                // 0..=100, all available in this profile. Evaluation is future work.
+                // 0..=100, all available in this profile.
                 if tag > 100 {
                     return Err(malformed(format!("unknown builtin tag {tag}")));
                 }
-                return Err(DecodeError::Unsupported(format!(
-                    "builtin {tag} is outside the implemented evaluator subset"
-                )));
+                let builtin = Builtin::from_tag(tag).ok_or_else(|| {
+                    DecodeError::Unsupported(format!(
+                        "builtin {tag} is outside the implemented evaluator subset"
+                    ))
+                })?;
+                Term::Builtin(builtin)
             }
             tag @ (8 | 9) => {
                 if version == [1, 0, 0] {
@@ -703,8 +707,8 @@ mod tests {
     }
 
     #[test]
-    fn known_builtins_are_unsupported_even_under_lambda_and_delay() {
-        for tag in [0, 54, 87, 100] {
+    fn unimplemented_builtins_are_unsupported_even_under_lambda_and_delay() {
+        for tag in [3, 54, 87, 100] {
             for prefix in [None, Some(1), Some(2)] {
                 let mut bits = Bits::program();
                 if let Some(prefix) = prefix {
@@ -722,6 +726,46 @@ mod tests {
             malformed_bytes(&bits.finish());
         }
         malformed_bytes(&[1, 0, 0, 0x70]);
+    }
+
+    #[test]
+    fn supported_builtins_are_structural_syntax_with_strict_complete_encodings() {
+        for tag in [0, 1, 2, 7, 8, 9, 26] {
+            for prefix in [None, Some(1), Some(2), Some(5)] {
+                let mut bits = Bits::program();
+                if let Some(prefix) = prefix {
+                    bits.write(prefix, 4);
+                }
+                bits.write(7, 4);
+                bits.write(tag, 7);
+                let encoded = bits.finish();
+                let program = decode(&encoded).unwrap();
+                assert_eq!(
+                    program.terms.last(),
+                    Some(&Term::Builtin(Builtin::from_tag(tag).unwrap()))
+                );
+                let expected = serde_json::json!(["builtin", tag.to_string()]);
+                assert_eq!(
+                    program.normalize().unwrap(),
+                    match prefix {
+                        None => expected,
+                        Some(1) => serde_json::json!(["delay", expected]),
+                        Some(2) => serde_json::json!(["lambda", expected]),
+                        Some(5) => serde_json::json!(["force", expected]),
+                        _ => unreachable!(),
+                    }
+                );
+                for end in 0..encoded.len() {
+                    malformed_bytes(&encoded[..end]);
+                }
+                let mut trailing = encoded.clone();
+                trailing.push(0);
+                malformed_bytes(&trailing);
+                let mut invalid_filler = encoded;
+                *invalid_filler.last_mut().unwrap() &= !1;
+                malformed_bytes(&invalid_filler);
+            }
+        }
     }
 
     #[test]

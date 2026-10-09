@@ -233,6 +233,12 @@ impl Machine<'_> {
                         State::Compute(function, env)
                     }
                     Term::Error => return Err(RuntimeError::ExplicitError.into()),
+                    Term::Builtin(_) => {
+                        return Err(RuntimeError::Unsupported(
+                            "builtin runtime is not implemented yet".into(),
+                        )
+                        .into());
+                    }
                 },
                 State::Return(value) => match self.frames.pop() {
                     None => {
@@ -409,6 +415,7 @@ impl Machine<'_> {
                             output.copy_constant(constant)?;
                         }
                         Term::Error => output.push(Term::Error),
+                        Term::Builtin(builtin) => output.push(Term::Builtin(*builtin)),
                         Term::Lambda(body) | Term::Delay(body) | Term::Force(body) => {
                             let (parent, binders) = match term {
                                 Term::Lambda(_) => (Parent::Lambda, binders + 1),

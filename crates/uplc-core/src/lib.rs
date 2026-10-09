@@ -13,6 +13,7 @@ use machine::MachineError;
 use uplc_conformance::{Budget, FailureKind, Language, Mode, Outcome, Program as Input, Request};
 
 pub mod ast;
+pub mod builtin;
 pub mod error;
 pub mod flat;
 pub mod limits;

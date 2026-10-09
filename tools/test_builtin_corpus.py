@@ -182,6 +182,72 @@ class ProvenanceTests(unittest.TestCase):
         self.mutate(lambda cases: cases.pop(), "reference disagreements must remain visible", builtin.AUDIT_CORPUS)
         self.mutate(lambda cases: cases.pop(), "remaining deferred coverage", builtin.UNSUPPORTED_CORPUS)
 
+    def test_decoder_and_unsupported_request_metadata_cannot_change(self):
+        manifest = json.loads((ROOT / builtin.MANIFEST).read_text())
+        other_profile = "fixtures/builtins/profiles/" + manifest["custom_models"][0]["id"] + ".json"
+        changes = (("id", "review/altered-id"), ("profile", "does-not-exist.json"),
+                   ("profile", other_profile), ("mode", {"kind": "counting"}),
+                   ("mode", {"kind": "restricting", "budget": {"cpu": "0", "mem": "0"}}),
+                   ("profile", None), ("mode", None))
+        unsupported = load_cases([ROOT / builtin.UNSUPPORTED_CORPUS])
+        first_new = next(i for i, case in enumerate(unsupported) if case["id"].startswith("builtins/"))
+        for corpus, index, diagnostic in ((builtin.DECODER_CORPUS, 0, "decoder request differs"),
+                                          (builtin.UNSUPPORTED_CORPUS, first_new, "unsupported request differs"),
+                                          (builtin.UNSUPPORTED_CORPUS, 0, "remaining deferred coverage")):
+            for field, value in changes:
+                with self.subTest(corpus=corpus, index=index, field=field, value=value):
+                    def change(cases):
+                        if value is None:
+                            cases[index].pop(field)
+                        else:
+                            cases[index][field] = copy.deepcopy(value)
+                    self.mutate(change, diagnostic, corpus)
+
+    def test_new_and_retained_unsupported_requests_validate_the_full_envelope(self):
+        for retained in (False, True):
+            with self.subTest(retained=retained), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                self.copy_tree(root)
+                cases = load_cases([root / builtin.UNSUPPORTED_CORPUS])
+                case = next(case for case in cases if case["id"].startswith("milestone/") == retained)
+                case["program"]["unexpected"] = True
+                (root / builtin.UNSUPPORTED_CORPUS).write_bytes(encode_jsonl(cases))
+                if retained:
+                    # Retention equality alone is insufficient if the input row
+                    # is malformed too; the copied request must still validate.
+                    previous_path = root / "fixtures/milestone-unsupported.jsonl"
+                    previous = load_cases([previous_path])
+                    next(row for row in previous if row["id"] == case["id"])["program"] = case["program"]
+                    previous_path.write_bytes(encode_jsonl(previous))
+                with self.assertRaisesRegex(ValueError, "expected fields"):
+                    builtin.verify_committed(root)
+
+    def test_request_profiles_are_validated_from_the_supplied_root(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.copy_tree(root)
+            self.assertEqual(builtin.verify_committed(root), builtin.verify_committed())
+            profile = json.loads((root / builtin.PROFILE).read_text())
+            profile["protocol_major"] = 65536
+            (root / builtin.PROFILE).write_text(json.dumps(profile))
+            # Keep independently reconstructed custom models consistent, so the
+            # invalid local wire profile itself must cause this rejection.
+            manifest = json.loads((root / builtin.MANIFEST).read_text())
+            for path, custom in builtin.custom_profiles(manifest, profile).items():
+                (root / path).write_text(json.dumps(custom))
+            with self.assertRaisesRegex(ValueError, "protocol_major must be a u16"):
+                builtin.verify_committed(root)
+
+    def test_request_profile_symlinks_cannot_escape_the_supplied_root(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.copy_tree(root)
+            profile_path = root / builtin.PROFILE
+            profile_path.unlink()
+            profile_path.symlink_to(ROOT / builtin.PROFILE)
+            with self.assertRaises(ValueError):
+                builtin.verify_committed(root)
+
     def test_budget_boundary_cannot_be_relaxed(self):
         def change(cases):
             case = next(case for case in cases if case["id"].endswith("/budget-cpu-minus-one"))

@@ -8,6 +8,7 @@ from conformance import ROOT, load_cases, make_request
 from upstreams import verify_source
 from build_milestone_corpus import verify_committed
 from build_builtin_corpus import verify_committed as verify_builtin_committed
+from build_division_corpus import verify_committed as verify_division_committed
 
 
 def verify():
@@ -48,6 +49,8 @@ def verify():
     print("verified milestone fixture provenance: " + json.dumps(counts, sort_keys=True))
     counts = verify_builtin_committed(sources={"plutus": plutus})
     print("verified builtin fixture provenance: " + json.dumps(counts, sort_keys=True))
+    counts = verify_division_committed(sources={"plutus": plutus})
+    print("verified division fixture provenance: " + json.dumps(counts, sort_keys=True))
 
 
 if __name__ == "__main__":

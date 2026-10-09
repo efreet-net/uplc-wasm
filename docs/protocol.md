@@ -76,9 +76,16 @@ may return an empty `id`. The outcomes are:
 | `unsupported` | `reason` |
 | `infrastructure_error` | `diagnostic` |
 
-The candidate currently identifies its revision by package version. Reference
-adapters use pinned source commit IDs. Add the candidate build commit to the
-identity before using reports as release provenance.
+The candidate's `revision` is `<package-version>+git.<full-build-commit>`;
+`.dirty` is appended when the build sees staged, unstaged, or nonignored
+untracked files anywhere in the repository. Ignored build outputs do not mark
+it dirty. Builds without usable Git metadata report
+`<package-version>+git.unknown`, including source archives inside unrelated
+repositories. Native and Wasm use the same core identity. This is a build-time
+snapshot; it does not describe later edits or certify reproducible builds.
+The small identity build script intentionally reruns on each Cargo build so
+incremental builds notice HEAD, dirty-state, and Git-metadata changes, including
+linked worktrees. Reference adapters retain their pinned source commit IDs.
 The runner rejects unknown response fields, duplicate JSON fields, nonfinite JSON
 numbers, malformed normalized constructors, and missing outcome fields. Every
 integer in a normalized term must be a canonical decimal string; booleans must

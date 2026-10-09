@@ -19,6 +19,10 @@ pub mod flat;
 pub mod limits;
 pub mod machine;
 
+/// Package version and source snapshot shared by native and Wasm responses.
+/// See `docs/protocol.md` for dirty-tree and unavailable-metadata semantics.
+pub const BUILD_REVISION: &str = env!("UPLC_BUILD_REVISION");
+
 pub fn evaluate(request: &Request) -> Outcome {
     let parameters = match request.validate() {
         Ok(parameters) => parameters,
@@ -102,5 +106,5 @@ fn runtime_outcome(error: RuntimeError, budget: Option<Budget>) -> Outcome {
 }
 
 pub fn evaluate_json(request: &str) -> String {
-    uplc_conformance::dispatch(request, "uplc-core", env!("CARGO_PKG_VERSION"), evaluate)
+    uplc_conformance::dispatch(request, "uplc-core", BUILD_REVISION, evaluate)
 }

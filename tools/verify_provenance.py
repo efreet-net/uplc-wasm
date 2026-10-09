@@ -7,6 +7,7 @@ import re
 from conformance import ROOT, load_cases, make_request
 from upstreams import verify_source
 from build_milestone_corpus import verify_committed
+from build_builtin_corpus import verify_committed as verify_builtin_committed
 
 
 def verify():
@@ -45,6 +46,8 @@ def verify():
     print(f"verified 350 profile coefficients and {checked} vendored seed input/result/budget triples")
     counts = verify_committed(sources={"plutus": plutus})
     print("verified milestone fixture provenance: " + json.dumps(counts, sort_keys=True))
+    counts = verify_builtin_committed(sources={"plutus": plutus})
+    print("verified builtin fixture provenance: " + json.dumps(counts, sort_keys=True))
 
 
 if __name__ == "__main__":

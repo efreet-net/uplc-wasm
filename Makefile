@@ -1,7 +1,7 @@
 PYTHON ?= python3
 WASM_BINDGEN ?= wasm-bindgen
 
-.PHONY: check test native upstreams references conformance report reference-check provenance wasm test-wasm test-browser generated import-plutus milestone-check milestone-reference-check
+.PHONY: check test native upstreams references conformance report reference-check provenance wasm test-wasm test-browser generated generated-flat generated-flat-check import-plutus milestone-check milestone-reference-check builtin-check builtin-reference-check builtin-all-check builtin-reference-audit
 
 check:
 	cargo fmt --all --check
@@ -35,10 +35,31 @@ milestone-reference-check: native references provenance
 	$(PYTHON) tools/build_milestone_corpus.py --check
 	$(PYTHON) tools/conformance.py --corpus fixtures/milestone.jsonl --engine native=target/debug/uplc-native --engine aiken=tools/oracle-aiken/target/debug/oracle-aiken --engine amaru=tools/oracle-amaru/target/debug/oracle-amaru --failure-costs --artifacts artifacts/milestone/references
 
+builtin-check: native
+	$(PYTHON) tools/conformance.py --corpus fixtures/builtins.jsonl fixtures/builtins-candidate.jsonl fixtures/builtins-decoder.jsonl --engine native=target/debug/uplc-native --artifacts artifacts/builtins/native
+
+builtin-reference-check: native references provenance
+	$(PYTHON) tools/build_builtin_corpus.py --check
+	$(PYTHON) tools/conformance.py --corpus fixtures/builtins.jsonl --engine native=target/debug/uplc-native --engine aiken=tools/oracle-aiken/target/debug/oracle-aiken --engine amaru=tools/oracle-amaru/target/debug/oracle-amaru --failure-costs --artifacts artifacts/builtins/references
+
+# All four engines must match the unchanged first milestone and builtin slice.
+# Independent decoder and official/wire-policy goldens remain strict candidate
+# checks where the raw reference APIs demonstrably disagree with those rules.
+builtin-all-check: native wasm references provenance
+	$(PYTHON) tools/build_milestone_corpus.py --check
+	$(PYTHON) tools/build_builtin_corpus.py --check
+	$(PYTHON) tools/conformance.py --corpus fixtures/milestone.jsonl fixtures/builtins.jsonl --engine native=target/debug/uplc-native --engine 'wasm=node tools/wasm-oracle.mjs' --engine aiken=tools/oracle-aiken/target/debug/oracle-aiken --engine amaru=tools/oracle-amaru/target/debug/oracle-amaru --failure-costs --artifacts artifacts/builtins/all-engines
+	$(PYTHON) tools/conformance.py --corpus fixtures/milestone-decoder.jsonl fixtures/builtins-candidate.jsonl fixtures/builtins-decoder.jsonl --engine native=target/debug/uplc-native --engine 'wasm=node tools/wasm-oracle.mjs' --failure-costs --artifacts artifacts/builtins/independent-policies
+
+# Deliberately failing audit: 23 semantic/cost mismatches and one reference
+# infrastructure error. Never reinterpret these records as conformance passes.
+builtin-reference-audit: native wasm references
+	$(PYTHON) tools/conformance.py --corpus fixtures/builtins-reference-audit.jsonl --engine native=target/debug/uplc-native --engine 'wasm=node tools/wasm-oracle.mjs' --engine aiken=tools/oracle-aiken/target/debug/oracle-aiken --engine amaru=tools/oracle-amaru/target/debug/oracle-amaru --failure-costs --artifacts artifacts/builtins/reference-audit
+
 # Broader coverage reporting permits unsupported cases, never mismatches.
 report: native
 	$(PYTHON) tools/conformance.py --engine native=target/debug/uplc-native --allow-unsupported
-	$(PYTHON) tools/conformance.py --corpus fixtures/milestone-unsupported.jsonl --engine native=target/debug/uplc-native --allow-unsupported --artifacts artifacts/milestone/unsupported
+	$(PYTHON) tools/conformance.py --corpus fixtures/builtins-unsupported.jsonl --engine native=target/debug/uplc-native --allow-unsupported --artifacts artifacts/builtins/unsupported
 
 provenance: upstreams
 	$(PYTHON) tools/verify_provenance.py
@@ -58,7 +79,13 @@ test-browser: native wasm
 	npm run test:browser
 
 generated:
-	$(PYTHON) tools/generate_cases.py --seed 42 --count 1000
+	$(PYTHON) tools/generate_cases.py --seed 42 --count 1000 $(if $(wildcard .cache/generated.jsonl),--check,)
+
+generated-flat: references provenance
+	$(PYTHON) tools/generate_cases.py --flat --seed 42 --count 1000 --output .cache/builtin-generated.jsonl $(if $(wildcard .cache/builtin-generated.jsonl),--check,)
+
+generated-flat-check: native wasm generated-flat
+	$(PYTHON) tools/conformance.py --corpus .cache/builtin-generated.jsonl --engine native=target/debug/uplc-native --engine 'wasm=node tools/wasm-oracle.mjs' --engine aiken=tools/oracle-aiken/target/debug/oracle-aiken --engine amaru=tools/oracle-amaru/target/debug/oracle-amaru --failure-costs --artifacts artifacts/builtins/generated
 
 import-plutus: references provenance
 	$(PYTHON) tools/import_plutus.py

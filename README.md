@@ -3,11 +3,14 @@
 An independent Cardano UPLC evaluator with pinned Aiken and
 Amaru reference adapters, official Plutus fixtures, and native/Wasm parity tests.
 
-**The first evaluator milestone implements a small raw Flat subset:** arbitrary
+**The evaluator implements a small raw Flat subset:** arbitrary
 precision integers, bytestrings, strings, booleans, unit, variables, lambdas and
 application, delay and force, and explicit errors. Native and Wasm call the same
-independent CEK machine, with exact startup/step costs and restricting budgets.
-Builtins, constr/case, composite constants, text parsing, counting mode, and
+independent CEK machine, with exact costs and restricting budgets. Its builtin
+slice includes `addInteger`, `subtractInteger`, `multiplyInteger`,
+`equalsInteger`, `lessThanInteger`, `lessThanEqualsInteger`, and `ifThenElse`,
+including forcing, partial application, and polymorphic returned values.
+Other builtins, constr/case, composite constants, text parsing, counting mode, and
 historical profiles remain explicitly unsupported. This is scoped conformance,
 not a complete UPLC evaluator; see [milestone coverage and limits](docs/milestone.md).
 
@@ -19,7 +22,7 @@ upstream's exact `nightly-2026-09-04` toolchain; its declared stable MSRV alone
 does not compile the pinned kernel code.
 
 ```sh
-make check test milestone-check
+make check test milestone-check builtin-check
 make report
 
 # Build the actual release Wasm artifact and exercise its JavaScript API.
@@ -34,8 +37,13 @@ make test-browser
 BROWSER=firefox npm run test:browser
 ```
 
-`make milestone-check` strictly checks 68 supported semantic/cost cases and 18
-independent decoder expectations. `make report` keeps broader smoke and deferred
+`make milestone-check` retains the original 68 semantic/cost cases and 18
+independent decoder expectations. `make builtin-check` adds 162 builtin cases,
+24 official/wire-policy cases, and 8 builtin decoder expectations.
+`make builtin-all-check` compares the 68 + 162 cases strictly across native,
+release Wasm, Aiken, Amaru, and independent goldens, including failure costs;
+the separate decoder/policy checks remain strict native/Wasm gates.
+`make report` keeps broader smoke and deferred
 feature coverage visible, reporting unsupported cases separately from passes.
 `make conformance` still checks the broad smoke corpus strictly and remains
 incomplete. Node and browser tests check committed independent goldens as well as
@@ -48,6 +56,10 @@ number precision. Unsupported scope assertions are separate from conformance pas
 rustup toolchain install nightly-2026-09-04 --profile minimal
 make reference-check
 make milestone-reference-check
+make builtin-all-check generated-flat-check
+
+# Intentionally nonzero: preserves 23 mismatches and one reference error.
+make builtin-reference-audit
 
 python3 tools/conformance.py \
   --engine native=target/debug/uplc-native \
@@ -89,6 +101,7 @@ explicitly unsupported by these starter adapters.
 | `fixtures/smoke.jsonl` | Nine small semantic, cost, trace, decoding, and budget cases |
 | `fixtures/milestone*.jsonl` | Strict Flat milestone, independent decoder goldens, and visible deferred/audit cases |
 | `fixtures/milestone/plutus` | Unmodified official subset inputs, expected results, and budgets |
+| `fixtures/builtins*.jsonl`, `fixtures/builtins` | Builtin strict/policy/decoder/audit scopes, 39 unmodified official triples, and reconstruction manifest |
 | `fixtures/plutus` | Unmodified upstream seed inputs/goldens, with LICENSE and NOTICE |
 | `profiles` | Explicit language/protocol/cost-model combinations |
 | `fuzz` | Separate cargo-fuzz workspace with transport and raw Flat entry points |
@@ -126,6 +139,12 @@ cargo +nightly fuzz run flat -- -max_total_time=60
 
 Generated cases are closed arithmetic programs, with seeded choices of integer
 boundaries and lambda/delay/force wrappers. Seeds and case indices are recorded.
+`make generated-flat-check` checks the same 1,000 seeded cases across native,
+release Wasm, and both references. `--flat` requires both reference encoders to
+agree and records source bytes, hashes, encoder identities, and an independently
+derived CEK/builtin charge ledger. It preserves the generator's mathematical
+expectations and adds exact costs without asking an evaluator to produce a
+golden. Generation refuses overwrites; `--check` reconstructs existing output.
 They currently have no automatic shrinker; minimize disagreements and save them
 under `fixtures/regressions` using the same JSONL format. Store real scripts
 with already-applied arguments and their historical profiles under
@@ -150,7 +169,7 @@ reported as mismatches, not silently skipped or rewritten into passing goldens.
 
 ## Implementation boundaries
 
-- Core/Wasm have no oracle dependencies. The implemented primitive CEK slice
+- Core/Wasm have no oracle dependencies. The implemented CEK/builtin slice
   uses arbitrary-precision integers and checked budget arithmetic independent
   of host pointer size. Costs come from the complete validated supplied vector;
   changing its hash and coefficients changes execution costs, regardless of ID.

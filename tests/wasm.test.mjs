@@ -46,6 +46,26 @@ test('unrepresentable consumed totals return budget exhaustion with a null budge
   assert.equal(outcome.budget, null);
 });
 
+test('builtin custom models preserve signed cancellation and reject negative computed charges', () => {
+  const outcome = id => JSON.parse(evaluate_json(requests.find(request =>
+    request.includes('"id":"' + id + '"')))).outcome;
+  assert.deepEqual(outcome('abi/builtin/signed/wide-cancellation').budget,
+    { cpu: '9223372036854775806', mem: '0' });
+  for (const dimension of ['cpu', 'memory']) {
+    assert.equal(outcome('abi/builtin/negative-' + dimension).status, 'unsupported');
+    const { status, kind, budget, traces } = outcome('abi/builtin/' + dimension + '-overflow');
+    assert.deepEqual({ status, kind, budget, traces },
+      { status: 'failure', kind: 'budget_exhausted', budget: null, traces: [] });
+  }
+});
+
+test('zero-cost builtins retain portable work and generated-payload bounds', () => {
+  const outcome = id => JSON.parse(evaluate_json(requests.find(request => request.includes(id)))).outcome;
+  assert.equal(outcome('abi/builtin/generated-payload/256').status, 'success');
+  assert.match(outcome('abi/builtin/generated-payload/512').reason, /runtime constant payload/);
+  assert.match(outcome('abi/builtin/work-limit').reason, /machine work bound/);
+});
+
 test('native and release Wasm accept the exact UTF-8 body limit and reject one byte more', () => {
   const limit = 8 * 1024 * 1024;
   const request = JSON.parse(requests[0]);

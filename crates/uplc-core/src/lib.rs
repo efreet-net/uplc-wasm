@@ -1,9 +1,10 @@
-//! Independent primitive UPLC evaluator shared by native and WebAssembly APIs.
+//! Independent UPLC evaluator shared by native and WebAssembly APIs.
 //!
-//! The first milestone supports bounded raw Flat programs, primitive constants,
-//! variables, lambdas/application, delay/force, and explicit errors under the
-//! supplied PlutusV3/protocol-11 restricting model. Other features and resource
-//! limits remain explicit Unsupported outcomes, never conformance passes.
+//! Supports bounded raw Flat programs, primitive constants, variables,
+//! lambdas/application, delay/force, explicit errors, and the seven integer/control
+//! builtins in [`builtin`] under the supplied PlutusV3/protocol-11 restricting
+//! model. Other features and resource limits remain explicit Unsupported
+//! outcomes, never conformance passes.
 
 pub mod cost;
 

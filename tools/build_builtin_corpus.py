@@ -16,7 +16,8 @@ from build_milestone_corpus import (
     encode_jsonl, expected_from_raw, publish, raw_record, reference_records,
     sha256, verify_profile,
 )
-from conformance import Engine, ROOT, load_cases, make_request
+from conformance import Engine, ROOT, load_cases
+from protocol import loads, string, validate_request
 from upstreams import verify_source
 
 MANIFEST = "fixtures/builtins/manifest.json"
@@ -182,6 +183,20 @@ def new_case(case_id, source, provenance, profile=PROFILE):
             "mode": {"kind": "restricting", "budget": LIMIT.copy()}, "provenance": provenance}
 
 
+def check_request(case, root):
+    """Validate the wire envelope using profiles from the root being verified."""
+    root = root.resolve()
+    string(case.get("profile"), nonempty=True)
+    profile_path = (root / case["profile"]).resolve()
+    profile_path.relative_to(root)
+    profile = loads(profile_path.read_text())
+    # As in conformance.make_request, on-disk provenance is not a wire field.
+    if type(profile) is dict:
+        profile = {key: profile[key] for key in ("id", "language", "protocol_major", "cost_model") if key in profile}
+    validate_request({"schema_version": 1, "id": case.get("id"), "program": case.get("program"),
+                      "profile": profile, "mode": case.get("mode")})
+
+
 def expected_probe(probe, profile, budget=None):
     budget = probe.get("budget", LIMIT) if budget is None else budget
     return ledger_outcome(probe["events"], profile["cost_model"]["parameters"], budget,
@@ -302,12 +317,11 @@ def verify_committed(root=ROOT, sources=None):
         raise ValueError("builtin selection differs from manifest")
     old_deferred = {case["id"]: case for case in load_cases([root / "fixtures/milestone-unsupported.jsonl"])}
     for case in cases:
-        make_request(case)
         p = case["provenance"]
         check_common(case, pins, sources)
         if case["id"].startswith("builtins/plutus/"):
             relative = case["id"].removeprefix("builtins/plutus/")
-            if case["profile"] != PROFILE or case["mode"] != {"kind": "restricting", "budget": LIMIT}:
+            if case.get("profile") != PROFILE or case.get("mode") != {"kind": "restricting", "budget": LIMIT}:
                 raise ValueError("official fixture profile or budget mode changed")
             path = Path(OFFICIAL_ROOT) / relative
             raw = {}
@@ -334,7 +348,7 @@ def verify_committed(root=ROOT, sources=None):
             if p["derivation"] != probe or p["manifest"] != MANIFEST:
                 raise ValueError("builtin derivation differs from manifest")
             check_source_record(p["source"], probe["source"].encode())
-            if case["profile"] != probe.get("profile", PROFILE):
+            if case.get("profile") != probe.get("profile", PROFILE):
                 raise ValueError("builtin profile differs from derivation")
             if "graduated_from" in probe:
                 original = old_deferred[probe["graduated_from"]]
@@ -358,7 +372,7 @@ def verify_committed(root=ROOT, sources=None):
                     component = variant.split("-")[0]
                     budget[component] = str(int(budget[component]) - 1)
             expected = expected_probe(probe, profile, budget)
-            if case["mode"] != {"kind": "restricting", "budget": budget}:
+            if case.get("mode") != {"kind": "restricting", "budget": budget}:
                 raise ValueError("budget boundary limit changed")
             if "expected_source" in probe:
                 if reference_records(p["normalizers"], "normalizer", pins)[0]["outcome"]["term"] != probe["term"]:
@@ -371,6 +385,9 @@ def verify_committed(root=ROOT, sources=None):
     if len(decoder) != len(manifest["decoder"]):
         raise ValueError("decoder selection differs")
     for case, probe in zip(decoder, manifest["decoder"]):
+        if (case["id"] != "builtins/decoder/" + probe["id"] or case.get("profile") != PROFILE or
+                case.get("mode") != {"kind": "restricting", "budget": LIMIT}):
+            raise ValueError("decoder request differs from manifest")
         check_common(case, pins, sources, encoders=False)
         if case["provenance"]["derivation"] != probe or case["program"] != {"format": "flat", "hex": probe["hex"]} or case["expected"] != probe["expected"]:
             raise ValueError("independent decoder fixture changed")
@@ -380,6 +397,9 @@ def verify_committed(root=ROOT, sources=None):
     if unsupported[:len(retained)] != retained or len(unsupported) != len(retained) + len(manifest["unsupported"]):
         raise ValueError("remaining deferred coverage or original provenance changed")
     for case, probe in zip(unsupported[len(retained):], manifest["unsupported"]):
+        if (case["id"] != "builtins/unsupported/" + probe["id"] or case.get("profile") != PROFILE or
+                case.get("mode") != {"kind": "restricting", "budget": LIMIT}):
+            raise ValueError("unsupported request differs from manifest")
         check_common(case, pins, sources)
         if case["provenance"]["derivation"] != probe or "expected" in case:
             raise ValueError("unsupported fixture changed")
@@ -388,6 +408,9 @@ def verify_committed(root=ROOT, sources=None):
                       case["provenance"].get("derivation", {}).get("reference_disagreement")]
     if outputs[AUDIT_CORPUS] != expected_audit:
         raise ValueError("reference disagreements must remain visible and unchanged")
+    for corpus in outputs.values():
+        for case in corpus:
+            check_request(case, root)
     return {"builtins": len(outputs[CORPUS]), "decoder": len(decoder),
             "candidate": len(outputs[CANDIDATE_CORPUS]), "audit": len(outputs[AUDIT_CORPUS]), "unsupported": len(unsupported),
             "official": len(manifest["official"]), "graduated": len(graduated)}

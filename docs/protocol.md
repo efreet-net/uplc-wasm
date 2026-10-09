@@ -60,6 +60,7 @@ PlutusV3/protocol 11, and exactly 350 supplied coefficients. Wrong vector length
 is an infrastructure error; negative machine-step coefficients are unsupported.
 Negative builtin polynomial coefficients are valid and are not substituted.
 The builtin subset is `addInteger`, `subtractInteger`, `multiplyInteger`,
+`divideInteger`, `quotientInteger`, `remainderInteger`, `modInteger`,
 `equalsInteger`, `lessThanInteger`, `lessThanEqualsInteger`, and `ifThenElse`.
 Partial and forced builtins normalize structurally using existing term syntax.
 Textual UPLC, counting, other profiles, other builtins, constr/case, and complex
@@ -101,9 +102,15 @@ Semantic errors do not flush pending events. A saturated builtin validates its
 argument types and semantics-E integer input bounds, then charges immediately
 without flushing pending CEK events, then debits portable implementation work
 and executes. Missing/excess forces, application before required forcing, and
-unlifting failures have no builtin application charge. Negative coefficients
-are allowed; a negative computed CPU or memory charge is unsupported, without
-clamping or crediting the budget. Exhaustion includes the entire
+unlifting failures have no builtin application charge. A zero divisor passes
+integer argument validation: the builtin charge and portable work debit precede
+the denotation's evaluation failure, leaving pending CEK events unflushed.
+All four division builtins use the semantics-E input interval
+`[-2^262143, 2^262143 - 1]`; their results have only the implementation magnitude
+limit. Division floors, quotient truncates toward zero, nonzero modulo has the
+divisor's sign, and nonzero remainder has the numerator's sign.
+Negative coefficients are allowed; a negative computed CPU or memory charge is
+unsupported, without clamping or crediting the budget. Exhaustion includes the entire
 attempted CPU and memory charge. Checked overflow beyond the i64 wire range is
 `budget_exhausted` with a null budget, never wrapping or saturation. Implementation
 resource/result limits yield unsupported. See [the milestone policy](milestone.md)

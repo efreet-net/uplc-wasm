@@ -1,7 +1,7 @@
 PYTHON ?= python3
 WASM_BINDGEN ?= wasm-bindgen
 
-.PHONY: check test native upstreams references conformance report reference-check provenance wasm test-wasm test-browser generated generated-flat generated-flat-check import-plutus milestone-check milestone-reference-check builtin-check builtin-reference-check builtin-all-check builtin-reference-audit
+.PHONY: check test native upstreams references conformance report reference-check provenance wasm test-wasm test-browser generated generated-flat generated-flat-check generated-division-flat generated-division-flat-check import-plutus milestone-check milestone-reference-check builtin-check builtin-reference-check builtin-all-check builtin-reference-audit division-check division-reference-check division-all-check division-reference-audit
 
 check:
 	cargo fmt --all --check
@@ -56,10 +56,29 @@ builtin-all-check: native wasm references provenance
 builtin-reference-audit: native wasm references
 	$(PYTHON) tools/conformance.py --corpus fixtures/builtins-reference-audit.jsonl --engine native=target/debug/uplc-native --engine 'wasm=node tools/wasm-oracle.mjs' --engine aiken=tools/oracle-aiken/target/debug/oracle-aiken --engine amaru=tools/oracle-amaru/target/debug/oracle-amaru --failure-costs --artifacts artifacts/builtins/reference-audit
 
+division-check: native
+	$(PYTHON) tools/conformance.py --corpus fixtures/division.jsonl fixtures/division-candidate.jsonl fixtures/division-decoder.jsonl --engine native=target/debug/uplc-native --failure-costs --artifacts artifacts/division/native
+
+division-reference-check: native references provenance
+	$(PYTHON) tools/build_division_corpus.py --check
+	$(PYTHON) tools/conformance.py --corpus fixtures/division.jsonl --engine native=target/debug/uplc-native --engine aiken=tools/oracle-aiken/target/debug/oracle-aiken --engine amaru=tools/oracle-amaru/target/debug/oracle-amaru --failure-costs --artifacts artifacts/division/references
+
+# Retain all 230 strict and 50 candidate regression cases, then add 349 strict
+# division cases and 60 independently justified candidate/decoder expectations.
+division-all-check: builtin-all-check
+	$(PYTHON) tools/build_division_corpus.py --check
+	$(PYTHON) tools/conformance.py --corpus fixtures/division.jsonl --engine native=target/debug/uplc-native --engine 'wasm=node tools/wasm-oracle.mjs' --engine aiken=tools/oracle-aiken/target/debug/oracle-aiken --engine amaru=tools/oracle-amaru/target/debug/oracle-amaru --failure-costs --artifacts artifacts/division/all-engines
+	$(PYTHON) tools/conformance.py --corpus fixtures/division-candidate.jsonl fixtures/division-decoder.jsonl --engine native=target/debug/uplc-native --engine 'wasm=node tools/wasm-oracle.mjs' --failure-costs --artifacts artifacts/division/independent-policies
+
+# This remains a failing audit: 30 mismatches and 14 reference errors. Neither
+# unsupported policies nor reference failures can be counted as strict passes.
+division-reference-audit: native wasm references
+	$(PYTHON) tools/conformance.py --corpus fixtures/division-reference-audit.jsonl --engine native=target/debug/uplc-native --engine 'wasm=node tools/wasm-oracle.mjs' --engine aiken=tools/oracle-aiken/target/debug/oracle-aiken --engine amaru=tools/oracle-amaru/target/debug/oracle-amaru --failure-costs --artifacts artifacts/division/reference-audit
+
 # Broader coverage reporting permits unsupported cases, never mismatches.
 report: native
 	$(PYTHON) tools/conformance.py --engine native=target/debug/uplc-native --allow-unsupported
-	$(PYTHON) tools/conformance.py --corpus fixtures/builtins-unsupported.jsonl --engine native=target/debug/uplc-native --allow-unsupported --artifacts artifacts/builtins/unsupported
+	$(PYTHON) tools/conformance.py --corpus fixtures/division-unsupported.jsonl --engine native=target/debug/uplc-native --allow-unsupported --artifacts artifacts/division/unsupported
 
 provenance: upstreams
 	$(PYTHON) tools/verify_provenance.py
@@ -86,6 +105,12 @@ generated-flat: references provenance
 
 generated-flat-check: native wasm generated-flat
 	$(PYTHON) tools/conformance.py --corpus .cache/builtin-generated.jsonl --engine native=target/debug/uplc-native --engine 'wasm=node tools/wasm-oracle.mjs' --engine aiken=tools/oracle-aiken/target/debug/oracle-aiken --engine amaru=tools/oracle-amaru/target/debug/oracle-amaru --failure-costs --artifacts artifacts/builtins/generated
+
+generated-division-flat: references provenance
+	$(PYTHON) tools/generate_cases.py --flat --division --seed 42 --count 1000 --output .cache/division-generated.jsonl $(if $(wildcard .cache/division-generated.jsonl),--check,)
+
+generated-division-flat-check: native wasm generated-division-flat
+	$(PYTHON) tools/conformance.py --corpus .cache/division-generated.jsonl --engine native=target/debug/uplc-native --engine 'wasm=node tools/wasm-oracle.mjs' --engine aiken=tools/oracle-aiken/target/debug/oracle-aiken --engine amaru=tools/oracle-amaru/target/debug/oracle-amaru --failure-costs --artifacts artifacts/division/generated
 
 import-plutus: references provenance
 	$(PYTHON) tools/import_plutus.py

@@ -8,6 +8,7 @@ precision integers, bytestrings, strings, booleans, unit, variables, lambdas and
 application, delay and force, and explicit errors. Native and Wasm call the same
 independent CEK machine, with exact costs and restricting budgets. Its builtin
 slice includes `addInteger`, `subtractInteger`, `multiplyInteger`,
+`divideInteger`, `quotientInteger`, `remainderInteger`, `modInteger`,
 `equalsInteger`, `lessThanInteger`, `lessThanEqualsInteger`, and `ifThenElse`,
 including forcing, partial application, and polymorphic returned values.
 Other builtins, constr/case, composite constants, text parsing, counting mode, and
@@ -22,7 +23,7 @@ upstream's exact `nightly-2026-09-04` toolchain; its declared stable MSRV alone
 does not compile the pinned kernel code.
 
 ```sh
-make check test milestone-check builtin-check
+make check test milestone-check builtin-check division-check
 make report
 
 # Build the actual release Wasm artifact and exercise its JavaScript API.
@@ -43,6 +44,8 @@ independent decoder expectations. `make builtin-check` adds 162 builtin cases,
 `make builtin-all-check` compares the 68 + 162 cases strictly across native,
 release Wasm, Aiken, Amaru, and independent goldens, including failure costs;
 the separate decoder/policy checks remain strict native/Wasm gates.
+`make division-all-check` retains those gates and adds 349 division-family
+cases across all four engines plus 60 native/Wasm policy and decoder cases.
 `make report` keeps broader smoke and deferred
 feature coverage visible, reporting unsupported cases separately from passes.
 `make conformance` still checks the broad smoke corpus strictly and remains
@@ -56,10 +59,12 @@ number precision. Unsupported scope assertions are separate from conformance pas
 rustup toolchain install nightly-2026-09-04 --profile minimal
 make reference-check
 make milestone-reference-check
-make builtin-all-check generated-flat-check
+make division-all-check generated-flat-check generated-division-flat-check
 
 # Intentionally nonzero: preserves 23 mismatches and one reference error.
 make builtin-reference-audit
+# Intentionally nonzero: 30 division mismatches and 14 reference errors.
+make division-reference-audit
 
 python3 tools/conformance.py \
   --engine native=target/debug/uplc-native \
@@ -102,6 +107,7 @@ explicitly unsupported by these starter adapters.
 | `fixtures/milestone*.jsonl` | Strict Flat milestone, independent decoder goldens, and visible deferred/audit cases |
 | `fixtures/milestone/plutus` | Unmodified official subset inputs, expected results, and budgets |
 | `fixtures/builtins*.jsonl`, `fixtures/builtins` | Builtin strict/policy/decoder/audit scopes, 39 unmodified official triples, and reconstruction manifest |
+| `fixtures/division*.jsonl`, `fixtures/division` | Division strict/policy/decoder/audit scopes, 24 unmodified official triples, and reconstruction manifest |
 | `fixtures/plutus` | Unmodified upstream seed inputs/goldens, with LICENSE and NOTICE |
 | `profiles` | Explicit language/protocol/cost-model combinations |
 | `fuzz` | Separate cargo-fuzz workspace with transport and raw Flat entry points |
@@ -145,6 +151,9 @@ agree and records source bytes, hashes, encoder identities, and an independently
 derived CEK/builtin charge ledger. It preserves the generator's mathematical
 expectations and adds exact costs without asking an evaluator to produce a
 golden. Generation refuses overwrites; `--check` reconstructs existing output.
+`make generated-division-flat-check` adds another 1,000 seeded Flat cases using
+`--division`, with exact integer division, sign rules, and zero-divisor charging
+derived independently. The original generator output remains unchanged.
 They currently have no automatic shrinker; minimize disagreements and save them
 under `fixtures/regressions` using the same JSONL format. Store real scripts
 with already-applied arguments and their historical profiles under
@@ -173,6 +182,11 @@ reported as mismatches, not silently skipped or rewritten into passing goldens.
   uses arbitrary-precision integers and checked budget arithmetic independent
   of host pointer size. Costs come from the complete validated supplied vector;
   changing its hash and coefficients changes execution costs, regardless of ID.
+- Division rounds down; quotient truncates toward zero. Nonzero modulo follows
+  the divisor's sign and remainder the numerator's sign. Correctly typed,
+  in-range zero-divisor calls incur their builtin charge before evaluation fails.
+  Exact polynomial costs preserve signed cancellation, branch conditions, and
+  official minima; portable work limits also apply under zero/custom models.
 - Both starter references expose restricting evaluation. Counting requests
   return `unsupported`; a large budget is never labeled counting mode. The
   full importer uses a stated large restricting budget for counting-mode

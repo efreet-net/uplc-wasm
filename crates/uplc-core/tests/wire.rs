@@ -13,6 +13,10 @@ const BUILTINS: &str = include_str!("../../../fixtures/builtins.jsonl");
 const BUILTIN_POLICY: &str = include_str!("../../../fixtures/builtins-candidate.jsonl");
 const BUILTIN_DECODER: &str = include_str!("../../../fixtures/builtins-decoder.jsonl");
 const BUILTIN_UNSUPPORTED: &str = include_str!("../../../fixtures/builtins-unsupported.jsonl");
+const DIVISION: &str = include_str!("../../../fixtures/division.jsonl");
+const DIVISION_POLICY: &str = include_str!("../../../fixtures/division-candidate.jsonl");
+const DIVISION_DECODER: &str = include_str!("../../../fixtures/division-decoder.jsonl");
+const DIVISION_UNSUPPORTED: &str = include_str!("../../../fixtures/division-unsupported.jsonl");
 
 fn cases(corpus: &str) -> impl Iterator<Item = Value> + '_ {
     corpus
@@ -34,6 +38,33 @@ fn request(case: &Value) -> Request {
         }
         "fixtures/builtins/profiles/zero.json" => {
             include_str!("../../../fixtures/builtins/profiles/zero.json")
+        }
+        "fixtures/division/profiles/distinct.json" => {
+            include_str!("../../../fixtures/division/profiles/distinct.json")
+        }
+        "fixtures/division/profiles/minimum.json" => {
+            include_str!("../../../fixtures/division/profiles/minimum.json")
+        }
+        "fixtures/division/profiles/cancellation.json" => {
+            include_str!("../../../fixtures/division/profiles/cancellation.json")
+        }
+        "fixtures/division/profiles/cancellation-positive.json" => {
+            include_str!("../../../fixtures/division/profiles/cancellation-positive.json")
+        }
+        "fixtures/division/profiles/cpu-overflow.json" => {
+            include_str!("../../../fixtures/division/profiles/cpu-overflow.json")
+        }
+        "fixtures/division/profiles/mem-overflow.json" => {
+            include_str!("../../../fixtures/division/profiles/mem-overflow.json")
+        }
+        "fixtures/division/profiles/negative-cpu.json" => {
+            include_str!("../../../fixtures/division/profiles/negative-cpu.json")
+        }
+        "fixtures/division/profiles/negative-mem.json" => {
+            include_str!("../../../fixtures/division/profiles/negative-mem.json")
+        }
+        "fixtures/division/profiles/zero.json" => {
+            include_str!("../../../fixtures/division/profiles/zero.json")
         }
         path => panic!("unregistered fixture profile {path}"),
     };
@@ -73,13 +104,16 @@ fn wire(request: &Request) -> Value {
 
 #[test]
 fn wire_matches_all_independent_semantic_cost_and_decoder_goldens() {
-    let mut counts = [0; 5];
+    let mut counts = [0; 8];
     for (index, corpus) in [
         MILESTONE,
         DECODER,
         BUILTINS,
         BUILTIN_POLICY,
         BUILTIN_DECODER,
+        DIVISION,
+        DIVISION_POLICY,
+        DIVISION_DECODER,
     ]
     .into_iter()
     .enumerate()
@@ -96,7 +130,7 @@ fn wire_matches_all_independent_semantic_cost_and_decoder_goldens() {
             counts[index] += 1;
         }
     }
-    assert_eq!(counts, [68, 18, 162, 24, 8]);
+    assert_eq!(counts, [68, 18, 162, 24, 8, 349, 44, 16]);
 }
 
 #[test]
@@ -121,7 +155,20 @@ fn future_features_are_unsupported_even_when_hidden_inside_values() {
     }
     assert_eq!(count, 6);
     assert_eq!(cases(BUILTIN_UNSUPPORTED).count(), 14);
+    let graduated: Vec<_> = cases(DIVISION)
+        .filter(|case| case["provenance"]["graduation"].is_object())
+        .collect();
+    assert_eq!(graduated.len(), 5);
     for case in cases(BUILTIN_UNSUPPORTED) {
+        if let Some(golden) = graduated
+            .iter()
+            .find(|golden| golden["provenance"]["graduation"]["id"] == case["id"])
+        {
+            // The retained old record keeps its source and provenance; its
+            // newly supported behavior must match the explicit strict golden.
+            assert_eq!(wire(&request(&case)), golden["expected"]);
+            continue;
+        }
         assert_eq!(
             wire(&request(&case))["status"],
             "unsupported",
@@ -129,10 +176,23 @@ fn future_features_are_unsupported_even_when_hidden_inside_values() {
             case["id"]
         );
     }
-    // lambda (builtin divideInteger): deferred builtins remain unsupported.
+    assert_eq!(cases(DIVISION_UNSUPPORTED).count(), 21);
+    for case in cases(DIVISION_UNSUPPORTED) {
+        let outcome = wire(&request(&case));
+        assert_eq!(outcome["status"], "unsupported", "{}", case["id"]);
+        if let Some(reason) = case["provenance"]["derivation"]["reason_contains"].as_str() {
+            assert!(
+                outcome["reason"].as_str().unwrap().contains(reason),
+                "{}: {}",
+                case["id"],
+                outcome["reason"]
+            );
+        }
+    }
+    // lambda (builtin appendByteString): deferred builtins remain unsupported.
     let mut request = constant_request();
     request.program = uplc_conformance::Program::Flat {
-        hex: raw_flat("001001110000011"),
+        hex: raw_flat("001001110001010"),
     };
     assert_eq!(wire(&request)["status"], "unsupported");
     // Supported builtin syntax is discharged without evaluating the body.

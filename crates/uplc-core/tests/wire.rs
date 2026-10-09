@@ -75,6 +75,14 @@ fn wire_matches_all_independent_semantic_cost_and_decoder_goldens() {
 fn future_features_are_unsupported_even_when_hidden_inside_values() {
     let mut count = 0;
     for case in cases(UNSUPPORTED) {
+        // Retain the original deferred fixture bytes and provenance. The bare
+        // addInteger value has now graduated to supported structural syntax.
+        if case["id"] == "milestone/unsupported/builtin" {
+            let outcome = wire(&request(&case));
+            assert_eq!(outcome["status"], "success");
+            assert_eq!(outcome["term"], json!(["builtin", "0"]));
+            continue;
+        }
         assert_eq!(
             wire(&request(&case))["status"],
             "unsupported",
@@ -83,7 +91,7 @@ fn future_features_are_unsupported_even_when_hidden_inside_values() {
         );
         count += 1;
     }
-    assert_eq!(count, 7);
+    assert_eq!(count, 6);
     // lambda (builtin divideInteger): deferred builtins remain unsupported.
     let mut request = constant_request();
     request.program = uplc_conformance::Program::Flat {

@@ -1,17 +1,22 @@
-//! Independent, iterative CEK evaluation for primitive UPLC terms.
+//! Independent, iterative CEK evaluation for primitive UPLC terms and builtins.
 //!
 //! The transition rules follow the pinned Plutus specification's
 //! `doc/plutus-core-spec/untyped-cek-machine.tex` (revision
 //! `5f785edeac0d1d89622d44344fdda07ef48e8c73`). Values and environments contain
 //! arena indices rather than recursive owners. Constants borrow their source
 //! term until discharge, so evaluating a constant does not copy its payload.
+//! Builtin results own bounded constants; partial builtins hold value indices
+//! and are immutable, so reusing a captured partial application cannot alter it.
 //!
 //! Startup is charged immediately. Compute events accumulate in batches of 200
 //! (the official default slippage), charged before the 200th event's action and
-//! on successful termination, in constant/variable/lambda/apply/delay/force order.
+//! on successful termination, in constant/variable/lambda/apply/delay/force/builtin order.
 //! Semantic errors do not flush an unfinished batch. Return, closure application,
 //! discharge, and explicit error have no execution-unit charge of their own.
 //! A failed charge retains the full attempted charge; see [`BudgetMeter`].
+//! Saturated builtin arguments are validated before their immediate application
+//! charge (pinned `Builtin/Meaning.hs`). Pending machine events are not flushed.
+//! Builtin work is debited next, and only then is the denotation executed.
 //! Independent resource bounds cover compute/return/discharge transitions and
 //! environment lookups, and at most one million aggregate runtime arena/frame
 //! entries. Discharge bounds expanded nodes, depth, and copied constant payload
@@ -22,9 +27,13 @@ use std::fmt;
 
 use crate::{
     ast::{Constant, Program, Term, TermId},
+    builtin::{Builtin, BuiltinArgument, BuiltinResult, integer_memory},
     cost::{BudgetError, BudgetMeter, ExecutionBudget, MachineCosts, Step},
     error::{DecodeError, RuntimeError},
-    limits::{MAX_MACHINE_STEPS, MAX_OUTPUT_BYTES, MAX_OUTPUT_DEPTH, MAX_OUTPUT_NODES},
+    limits::{
+        MAX_MACHINE_STEPS, MAX_OUTPUT_BYTES, MAX_OUTPUT_DEPTH, MAX_OUTPUT_NODES,
+        MAX_RUNTIME_CONSTANT_BYTES,
+    },
 };
 
 /// Values, environment cells, and pending frames together may contain this many
@@ -93,6 +102,7 @@ pub fn evaluate(program: &Program, costs: &MachineCosts, limit: ExecutionBudget)
 struct ResourceLimits {
     work: usize,
     entries: usize,
+    constant_bytes: usize,
 }
 
 impl Default for ResourceLimits {
@@ -100,6 +110,7 @@ impl Default for ResourceLimits {
         Self {
             work: MAX_MACHINE_STEPS,
             entries: MAX_RUNTIME_ENTRIES,
+            constant_bytes: MAX_RUNTIME_CONSTANT_BYTES,
         }
     }
 }
@@ -132,6 +143,9 @@ fn evaluate_with_limits(
             costs,
             meter: &mut meter,
             values: Vec::new(),
+            constants: Vec::new(),
+            constant_bytes: 0,
+            constant_byte_limit: resources.constant_bytes,
             environments: Vec::new(),
             frames: Vec::new(),
             work_left: resources.work,
@@ -155,8 +169,31 @@ type Environment = Option<EnvId>;
 #[derive(Clone, Copy)]
 enum Value {
     Constant(TermId),
+    ProducedConstant(usize),
     Lambda { body: TermId, env: Environment },
     Delay { body: TermId, env: Environment },
+    Builtin(BuiltinValue),
+}
+
+/// All supported signatures have at most three arguments, with forces before
+/// arguments. Fixed storage keeps every runtime value's allocation bounded.
+#[derive(Clone, Copy)]
+struct BuiltinValue {
+    builtin: Builtin,
+    forces: u8,
+    arguments: [ValueId; 3],
+    argument_count: usize,
+}
+
+impl BuiltinValue {
+    fn new(builtin: Builtin) -> Self {
+        Self {
+            builtin,
+            forces: 0,
+            arguments: [0; 3],
+            argument_count: 0,
+        }
+    }
 }
 
 struct EnvEntry {
@@ -181,6 +218,9 @@ struct Machine<'a> {
     costs: &'a MachineCosts,
     meter: &'a mut BudgetMeter,
     values: Vec<Value>,
+    constants: Vec<Constant>,
+    constant_bytes: usize,
+    constant_byte_limit: usize,
     environments: Vec<EnvEntry>,
     frames: Vec<Frame>,
     work_left: usize,
@@ -234,11 +274,9 @@ impl Machine<'_> {
                         State::Compute(function, env)
                     }
                     Term::Error => return Err(RuntimeError::ExplicitError.into()),
-                    Term::Builtin(_) => {
-                        return Err(RuntimeError::Unsupported(
-                            "builtin runtime is not implemented yet".into(),
-                        )
-                        .into());
+                    Term::Builtin(builtin) => {
+                        self.step(Step::Builtin)?;
+                        State::Return(self.value(Value::Builtin(BuiltinValue::new(*builtin)))?)
                     }
                 },
                 State::Return(value) => match self.frames.pop() {
@@ -257,14 +295,98 @@ impl Machine<'_> {
                             let env = self.extend(env, value)?;
                             State::Compute(body, Some(env))
                         }
+                        Value::Builtin(builtin) => {
+                            State::Return(self.apply_builtin(builtin, value)?)
+                        }
                         _ => return Err(RuntimeError::NonFunctionApplication.into()),
                     },
                     Some(Frame::Force) => match self.values[value] {
                         Value::Delay { body, env } => State::Compute(body, env),
+                        Value::Builtin(mut builtin)
+                            if builtin.forces < builtin.builtin.force_count() =>
+                        {
+                            builtin.forces += 1;
+                            State::Return(self.value(Value::Builtin(builtin))?)
+                        }
                         _ => return Err(RuntimeError::NonDelayForce.into()),
                     },
                 },
             };
+        }
+    }
+
+    fn builtin_arguments(&self, builtin: &BuiltinValue) -> [BuiltinArgument<'_>; 3] {
+        let mut arguments = [BuiltinArgument::Opaque; 3];
+        for (argument, value) in arguments
+            .iter_mut()
+            .zip(builtin.arguments[..builtin.argument_count].iter().copied())
+        {
+            *argument = match self.values[value] {
+                Value::Constant(term) => {
+                    let Term::Constant(constant) = &self.program.terms[term] else {
+                        unreachable!("source constant value")
+                    };
+                    BuiltinArgument::Constant(constant)
+                }
+                Value::ProducedConstant(index) => BuiltinArgument::Constant(&self.constants[index]),
+                _ => BuiltinArgument::Opaque,
+            };
+        }
+        arguments
+    }
+
+    fn apply_builtin(
+        &mut self,
+        mut partial: BuiltinValue,
+        argument: ValueId,
+    ) -> Result<ValueId, MachineError> {
+        if partial.forces != partial.builtin.force_count() {
+            return Err(RuntimeError::NonFunctionApplication.into());
+        }
+        partial.arguments[partial.argument_count] = argument;
+        partial.argument_count += 1;
+        if partial.argument_count < partial.builtin.arity() {
+            // Copy the fixed-size descriptor; never mutate an existing value.
+            // A wrong-typed argument remains legal until full saturation.
+            return self.value(Value::Builtin(partial)).map_err(Into::into);
+        }
+
+        let builtin = partial.builtin;
+        let (left_size, right_size) = {
+            let arguments = self.builtin_arguments(&partial);
+            let arguments = &arguments[..partial.argument_count];
+            builtin.validate_arguments(arguments)?;
+            if builtin == Builtin::IfThenElse {
+                (0, 0)
+            } else {
+                let [
+                    BuiltinArgument::Constant(Constant::Integer(left)),
+                    BuiltinArgument::Constant(Constant::Integer(right)),
+                ] = arguments
+                else {
+                    unreachable!("validated integer arguments")
+                };
+                (integer_memory(left), integer_memory(right))
+            }
+        };
+        self.meter
+            .charge_builtin(self.costs.builtin_cost(builtin, left_size, right_size))
+            .map_err(|error| match error {
+                BudgetError::NegativeCharge { .. } => {
+                    MachineError::Runtime(RuntimeError::Unsupported(format!("{builtin}: {error}")))
+                }
+                error => MachineError::Budget(error),
+            })?;
+        let work =
+            builtin.work_units(&self.builtin_arguments(&partial)[..partial.argument_count])?;
+        self.debit_work(work)?;
+        let result =
+            builtin.evaluate(&self.builtin_arguments(&partial)[..partial.argument_count])?;
+        match result {
+            BuiltinResult::Constant(constant) => {
+                self.produced_constant(constant).map_err(Into::into)
+            }
+            BuiltinResult::Argument(index) => Ok(partial.arguments[index]),
         }
     }
 
@@ -297,9 +419,13 @@ impl Machine<'_> {
     }
 
     fn work(&mut self) -> Result<(), RuntimeError> {
+        self.debit_work(1)
+    }
+
+    fn debit_work(&mut self, units: usize) -> Result<(), RuntimeError> {
         self.work_left = self
             .work_left
-            .checked_sub(1)
+            .checked_sub(units)
             .ok_or_else(|| RuntimeError::Unsupported("machine work bound exceeded".into()))?;
         Ok(())
     }
@@ -318,6 +444,27 @@ impl Machine<'_> {
         let id = self.values.len();
         self.values.push(value);
         Ok(id)
+    }
+
+    fn produced_constant(&mut self, constant: Constant) -> Result<ValueId, RuntimeError> {
+        self.reserve_entry()?;
+        let bytes = constant_payload_bytes(&constant);
+        // Each individual result is bounded before arriving here. Even the
+        // transient rejected result adds at most one 64 KiB integer allocation.
+        let total = self
+            .constant_bytes
+            .checked_add(bytes)
+            .filter(|total| *total <= self.constant_byte_limit)
+            .ok_or_else(|| {
+                RuntimeError::Unsupported(format!(
+                    "runtime constant payload exceeds {} bytes",
+                    self.constant_byte_limit
+                ))
+            })?;
+        let index = self.constants.len();
+        self.constants.push(constant);
+        self.constant_bytes = total;
+        self.value(Value::ProducedConstant(index))
     }
 
     fn frame(&mut self, frame: Frame) -> Result<(), RuntimeError> {
@@ -372,6 +519,16 @@ impl Machine<'_> {
                         binders: 0,
                         depth,
                     }),
+                    Value::ProducedConstant(index) => {
+                        output.visit(depth)?;
+                        output.copy_constant(&self.constants[index])?;
+                    }
+                    Value::Builtin(builtin) => pending.push(Discharge::Builtin {
+                        builtin,
+                        arguments: builtin.argument_count,
+                        forces: builtin.forces,
+                        depth,
+                    }),
                     Value::Lambda { body, env } => {
                         output.visit(depth)?;
                         pending.push(Discharge::Finish(Parent::Lambda));
@@ -393,6 +550,37 @@ impl Machine<'_> {
                         });
                     }
                 },
+                Discharge::Builtin {
+                    builtin,
+                    arguments,
+                    forces,
+                    depth,
+                } => {
+                    output.visit(depth)?;
+                    if arguments > 0 {
+                        pending.push(Discharge::Finish(Parent::Apply));
+                        pending.push(Discharge::Value {
+                            value: builtin.arguments[arguments - 1],
+                            depth: depth + 1,
+                        });
+                        pending.push(Discharge::Builtin {
+                            builtin,
+                            arguments: arguments - 1,
+                            forces,
+                            depth: depth + 1,
+                        });
+                    } else if forces > 0 {
+                        pending.push(Discharge::Finish(Parent::Force));
+                        pending.push(Discharge::Builtin {
+                            builtin,
+                            arguments: 0,
+                            forces: forces - 1,
+                            depth: depth + 1,
+                        });
+                    } else {
+                        output.push(Term::Builtin(builtin.builtin));
+                    }
+                }
                 Discharge::Term {
                     term,
                     env,
@@ -473,6 +661,12 @@ enum Discharge {
         value: ValueId,
         depth: usize,
     },
+    Builtin {
+        builtin: BuiltinValue,
+        arguments: usize,
+        forces: u8,
+        depth: usize,
+    },
     Term {
         term: TermId,
         env: Environment,
@@ -512,12 +706,7 @@ impl DischargeOutput {
     }
 
     fn copy_constant(&mut self, constant: &Constant) -> Result<(), RuntimeError> {
-        let bytes = match constant {
-            Constant::Integer(integer) => integer.bits().div_ceil(8) as usize,
-            Constant::String(string) => string.len(),
-            Constant::ByteString(bytes) => bytes.len(),
-            Constant::Bool(_) | Constant::Unit => 0,
-        };
+        let bytes = constant_payload_bytes(constant);
         // Bounds are checked before copying. The sum cannot overflow because
         // each source payload and the prior sum have already been bounded.
         self.payload_bytes += bytes;
@@ -544,6 +733,18 @@ impl DischargeOutput {
         self.push(term);
     }
 }
+
+fn constant_payload_bytes(constant: &Constant) -> usize {
+    match constant {
+        Constant::Integer(integer) => integer.bits().div_ceil(8) as usize,
+        Constant::String(string) => string.len(),
+        Constant::ByteString(bytes) => bytes.len(),
+        Constant::Bool(_) | Constant::Unit => 0,
+    }
+}
+
+#[cfg(test)]
+mod builtin_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1216,6 +1417,7 @@ mod tests {
                 ResourceLimits {
                     work: 30,
                     entries: MAX_RUNTIME_ENTRIES,
+                    ..ResourceLimits::default()
                 },
                 "work bound",
             ),
@@ -1223,6 +1425,7 @@ mod tests {
                 ResourceLimits {
                     work: MAX_MACHINE_STEPS,
                     entries: 30,
+                    ..ResourceLimits::default()
                 },
                 "arena bound",
             ),
@@ -1267,6 +1470,7 @@ mod tests {
                 ResourceLimits {
                     work: MAX_MACHINE_STEPS,
                     entries: limit,
+                    ..ResourceLimits::default()
                 },
             );
             assert!(matches!(

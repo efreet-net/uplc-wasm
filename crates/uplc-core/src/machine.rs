@@ -34,13 +34,14 @@ pub const MAX_RUNTIME_ENTRIES: usize = 1_000_000;
 /// Pinned official CEK `defaultSlippage`, also used by both reference adapters.
 const SLIPPAGE: u32 = 200;
 
-const CHARGE_ORDER: [Step; 6] = [
+const CHARGE_ORDER: [Step; 7] = [
     Step::Constant,
     Step::Var,
     Step::Lambda,
     Step::Apply,
     Step::Delay,
     Step::Force,
+    Step::Builtin,
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,7 +136,7 @@ fn evaluate_with_limits(
             frames: Vec::new(),
             work_left: resources.work,
             entry_limit: resources.entries,
-            event_counts: [0; 6],
+            event_counts: [0; 7],
             pending_events: 0,
         };
         let value = machine.run()?;
@@ -184,7 +185,7 @@ struct Machine<'a> {
     frames: Vec<Frame>,
     work_left: usize,
     entry_limit: usize,
-    event_counts: [u32; 6],
+    event_counts: [u32; 7],
     pending_events: u32,
 }
 
@@ -275,6 +276,7 @@ impl Machine<'_> {
             Step::Apply => 3,
             Step::Delay => 4,
             Step::Force => 5,
+            Step::Builtin => 6,
             Step::Startup => unreachable!("startup is charged before machine construction"),
         };
         self.event_counts[index] += 1;

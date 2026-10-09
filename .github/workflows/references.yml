@@ -34,7 +34,7 @@ jobs:
             tools/oracle-aiken/target
             tools/oracle-amaru/target
           key: references-${{ runner.os }}-${{ hashFiles('upstreams.lock.json', '**/Cargo.lock') }}
-      - run: make reference-check builtin-all-check generated-flat-check
+      - run: make reference-check division-all-check generated-flat-check generated-division-flat-check
       - run: make generated
       - name: Generated cases against both references
         run: >-
@@ -68,6 +68,31 @@ jobs:
           assert actual == expected and len(report['cases']) == len(expected), report['summary']
           assert report['summary'] == {'pass': 0, 'mismatch': 23, 'error': 1, 'unsupported': 0, 'total': 24, 'complete': False}
           print('Retained audit is incomplete: exactly 23 mismatches and 1 reference infrastructure error; zero conformance passes.')
+          PY
+      - name: Division reference disagreements (expected to fail)
+        id: division_audit
+        continue-on-error: true
+        run: make division-reference-audit
+      - name: Require the exact division audit failures
+        if: always()
+        env:
+          AUDIT_OUTCOME: ${{ steps.division_audit.outcome }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          assert os.environ['AUDIT_OUTCOME'] == 'failure', 'the audit must remain visibly failing'
+          report = json.loads(Path('artifacts/division/reference-audit/report.json').read_text())
+          cases = [json.loads(line) for line in Path('fixtures/division-reference-audit.jsonl').read_text().splitlines()]
+          names = ['divideInteger', 'quotientInteger', 'remainderInteger', 'modInteger']
+          errors = {f'division/probe/{name}-{probe}' for name in names for probe in ['cancellation', 'cancellation-positive', 'cpu-overflow']}
+          errors |= {f'division/probe/{name}-mem-overflow' for name in names[:2]}
+          expected = {case['id']: ('error' if case['id'] in errors else 'mismatch') for case in cases}
+          assert len(errors) == 14 and errors <= expected.keys()
+          actual = {case['id']: case['category'] for case in report['cases']}
+          assert actual == expected and len(report['cases']) == len(expected), report['summary']
+          assert report['summary'] == {'pass': 0, 'mismatch': 30, 'error': 14, 'unsupported': 0, 'total': 44, 'complete': False}
+          print('Division audit is incomplete: exactly 30 mismatches and 14 reference infrastructure errors; zero conformance passes.')
           PY
       - name: Import full pinned corpus
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

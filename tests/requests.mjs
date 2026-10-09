@@ -23,6 +23,9 @@ for (const [path, scope] of [
   ['fixtures/builtins.jsonl', 'builtin semantic/cost goldens'],
   ['fixtures/builtins-candidate.jsonl', 'builtin official and wire policies'],
   ['fixtures/builtins-decoder.jsonl', 'builtin decoder goldens'],
+  ['fixtures/division.jsonl', 'division semantic/cost goldens'],
+  ['fixtures/division-candidate.jsonl', 'division official and wire policies'],
+  ['fixtures/division-decoder.jsonl', 'division decoder goldens'],
 ]) {
   for (const fixture of readCases(path)) {
     const expected = { traces: [], ...fixture.expected };
@@ -30,12 +33,14 @@ for (const [path, scope] of [
     add(makeRequest(fixture), expected, scope);
   }
 }
-for (const fixture of readCases('fixtures/builtins-unsupported.jsonl')) {
+for (const fixture of readCases('fixtures/division-unsupported.jsonl')) {
   // Scope assertions only: unsupported results must never be conformance passes.
-  // The six still-deferred original fixtures are retained verbatim here. The
-  // seventh, bare addInteger, is now an explicit strict builtin golden with its
-  // original provenance retained in provenance.graduation.
-  add(makeRequest(fixture), { status: 'unsupported' }, 'unsupported scope');
+  // Nine retained records remain deferred; five former division records have
+  // strict graduation goldens above. Twelve model/resource policies also remain
+  // unsupported, with a reason assertion to prevent an unrelated limit passing.
+  const reason = fixture.provenance.derivation?.reason_contains;
+  add(makeRequest(fixture), { status: 'unsupported' }, 'unsupported scope',
+    reason ? new RegExp(reason) : undefined);
 }
 for (const fixture of readCases('fixtures/smoke.jsonl')) {
   add(makeRequest(fixture), fixture.program.format === 'flat' ? fixture.expected : { status: 'unsupported' }, 'legacy smoke');
@@ -144,7 +149,8 @@ function customBuiltin(id, term, coefficients, budget, expected, reasonPattern) 
   }
   request.mode.budget = budget;
   rehash(request);
-  add(request, expected, 'builtin ABI and portable limits', reasonPattern);
+  add(request, expected, id.startsWith('division/')
+    ? 'division ABI and portable limits' : 'builtin ABI and portable limits', reasonPattern);
 }
 const maximumBudget = { cpu: '9223372036854775807', mem: '9223372036854775807' };
 const twoWordAdd = binaryBits(0, integerBits(1n << 64n), integerBits(1n));
@@ -191,6 +197,91 @@ for (let depth = 1; depth <= 9; depth++) {
   customBuiltin('generated-payload/' + (2 ** depth), term, {}, { cpu: '0', mem: '0' },
     depth === 8 ? builtinSuccess(largeInteger * 256n, 0, 0) : { status: 'unsupported' },
     depth === 9 ? /runtime constant payload exceeds 8388608 bytes/ : undefined);
+}
+
+// Division ledger positions come from pinned V3/ParamName.hs. The polynomial
+// order is c00,c01*y,c02*y*y,c10*x,c11*x*y,c20*x*x, followed by its minimum.
+// These BigInt expectations and raw encodings do not call an evaluator.
+const divisionBuiltins = [
+  ['divideInteger', 3, 49], ['quotientInteger', 4, 130],
+  ['remainderInteger', 5, 141], ['modInteger', 6, 114],
+];
+const maximumCoefficient = 9223372036854775807n;
+const chargedFailure = (kind, cpu, mem) => ({ status: 'failure', kind,
+  budget: { cpu: cpu.toString(), mem: mem.toString() }, traces: [] });
+for (const [name, tag, index] of divisionBuiltins) {
+  const quotient = tag === 3 || tag === 4;
+  const prefix = 'division/' + name + '/';
+  const twoWords = 1n << 64n;
+  const equalArguments = binaryBits(tag, integerBits(twoWords), integerBits(twoWords));
+  const result = quotient ? 1n : 0n;
+  // Equal quadratic terms each exceed i64 but cancel exactly; no intermediate
+  // saturation may erase the independently supplied positive constant 37.
+  const cancellation = { [index + 1]: 37, [index + 3]: -maximumCoefficient,
+    [index + 6]: maximumCoefficient };
+  customBuiltin(prefix + 'positive-cancellation', equalArguments, cancellation,
+    { cpu: '37', mem: '0' }, builtinSuccess(result, 37, 0));
+  const asymmetric = binaryBits(tag, integerBits(twoWords), integerBits(1n));
+  customBuiltin(prefix + 'wide-cancellation', asymmetric,
+    { [index + 1]: -9223372036854775808n, [index + 4]: -9223372036854775808n,
+      [index + 6]: maximumCoefficient }, maximumBudget,
+    builtinSuccess(quotient ? twoWords : 0n, maximumCoefficient - 3n, 0));
+  for (const [dimension, coefficients] of [
+    ['cpu', { [index + 6]: maximumCoefficient }],
+    ['memory', quotient
+      ? { [index + 9]: 2, [index + 10]: maximumCoefficient }
+      : { [index + 9]: maximumCoefficient }],
+  ]) {
+    customBuiltin(prefix + dimension + '-overflow', equalArguments, coefficients,
+      maximumBudget, { status: 'failure', kind: 'budget_exhausted', budget: null, traces: [] });
+  }
+  for (const [dimension, coefficients] of [
+    ['cpu', { [index + 1]: -1, [index + 7]: -2 }],
+    ['memory', { [index + 8]: -1 }],
+  ]) {
+    customBuiltin(prefix + 'negative-' + dimension, equalArguments, coefficients,
+      maximumBudget, { status: 'unsupported' }, /negative/);
+  }
+  const applicationCharge = { [index + 1]: 7, [index + 8]: 9 };
+  const zeroDivisor = binaryBits(tag, integerBits(1n), integerBits(0n));
+  for (const [label, cpu, mem] of [['exact', '7', '9'], ['cpu-short', '6', '9'], ['mem-short', '7', '8']]) {
+    customBuiltin(prefix + 'zero-divisor/' + label, zeroDivisor, applicationCharge,
+      { cpu, mem }, chargedFailure(label === 'exact' ? 'evaluation' : 'budget_exhausted', 7, 9));
+  }
+
+  // Magnitudes of 3,161 and 3,162 64-bit words are both legal E inputs.
+  // max(x,y)+x*y is respectively 9,995,082 and 10,001,406. The smaller
+  // operation leaves room for its CEK/discharge work; the larger exceeds the
+  // ten-million cap before arithmetic, even though equal operands are easy.
+  for (const words of [3161, 3162]) {
+    const operand = integerBits(1n << (64n * BigInt(words - 1)));
+    const term = binaryBits(tag, operand, operand);
+    customBuiltin(prefix + 'work/' + words, term, {}, { cpu: '0', mem: '0' },
+      words === 3161 ? builtinSuccess(result, 0, 0) : { status: 'unsupported' },
+      words === 3162 ? /machine work bound/ : undefined);
+    if (words === 3162) {
+      customBuiltin(prefix + 'work/charged', term, applicationCharge, { cpu: '7', mem: '9' },
+        { status: 'unsupported' }, /machine work bound/);
+      customBuiltin(prefix + 'work/charge-exhausted', term, applicationCharge, { cpu: '6', mem: '9' },
+        chargedFailure('budget_exhausted', 7, 9));
+    }
+  }
+
+  if (quotient) {
+    // The lambda borrows one input; every leaf divides that variable by one.
+    // A balanced tree with 128 leaves creates 255 integers (6,375,255 payload
+    // bytes); 256 leaves create 511 and cross 8 MiB. All other bounds, including
+    // less than three million work units, leave ample space for both probes.
+    let divisionTree = binaryBits(tag, variableOne, integerBits(1n));
+    for (let depth = 1; depth <= 8; depth++) {
+      divisionTree = binaryBits(0, divisionTree, divisionTree);
+      if (depth < 7) continue;
+      const term = '00110010' + divisionTree + integerBits(largeInteger);
+      customBuiltin(prefix + 'generated-payload/' + (2 ** depth), term, {}, { cpu: '0', mem: '0' },
+        depth === 7 ? builtinSuccess(largeInteger * 128n, 0, 0) : { status: 'unsupported' },
+        depth === 8 ? /runtime constant payload exceeds 8388608 bytes/ : undefined);
+    }
+  }
 }
 
 export function assertExpectedOutcomes(responses) {

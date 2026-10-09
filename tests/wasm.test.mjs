@@ -66,6 +66,30 @@ test('zero-cost builtins retain portable work and generated-payload bounds', () 
   assert.match(outcome('abi/builtin/work-limit').reason, /machine work bound/);
 });
 
+test('division polynomials preserve positive cancellation through the release Wasm API', () => {
+  for (const name of ['divideInteger', 'quotientInteger', 'remainderInteger', 'modInteger']) {
+    const id = 'abi/builtin/division/' + name + '/positive-cancellation';
+    const request = requests.find(request => request.includes('"id":"' + id + '"'));
+    assert.deepEqual(JSON.parse(evaluate_json(request)).outcome.budget, { cpu: '37', mem: '0' });
+  }
+});
+
+test('division work and payload limits stay unsupported under zero and custom costs', () => {
+  const outcome = id => JSON.parse(evaluate_json(requests.find(request =>
+    request.includes('"id":"abi/builtin/division/' + id + '"')))).outcome;
+  for (const name of ['divideInteger', 'quotientInteger', 'remainderInteger', 'modInteger']) {
+    assert.equal(outcome(name + '/work/3161').status, 'success');
+    for (const probe of ['3162', 'charged']) {
+      assert.match(outcome(name + '/work/' + probe).reason, /machine work bound/);
+    }
+    assert.deepEqual(outcome(name + '/work/charge-exhausted').budget, { cpu: '7', mem: '9' });
+  }
+  for (const name of ['divideInteger', 'quotientInteger']) {
+    assert.equal(outcome(name + '/generated-payload/128').status, 'success');
+    assert.match(outcome(name + '/generated-payload/256').reason, /runtime constant payload/);
+  }
+});
+
 test('native and release Wasm accept the exact UTF-8 body limit and reject one byte more', () => {
   const limit = 8 * 1024 * 1024;
   const request = JSON.parse(requests[0]);

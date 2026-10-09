@@ -1,7 +1,7 @@
 //! Independent UPLC evaluator shared by native and WebAssembly APIs.
 //!
 //! Supports bounded raw Flat programs, primitive constants, variables,
-//! lambdas/application, delay/force, explicit errors, and the seven integer/control
+//! lambdas/application, delay/force, explicit errors, and the eleven integer/control
 //! builtins in [`builtin`] under the supplied PlutusV3/protocol-11 restricting
 //! model. Other features and resource limits remain explicit Unsupported
 //! outcomes, never conformance passes.
